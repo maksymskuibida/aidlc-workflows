@@ -238,7 +238,14 @@ export function makeSeed(
     "aidlc/.aidlc-clone-id\naidlc/.aidlc-unit-scope.json\n" +
       "aidlc/.aidlc-unit-parked\naidlc/.aidlc-claim-generations.json\n" +
       "aidlc/.aidlc-unit-participant\naidlc/.aidlc-claim-registry.json\n" +
-      "aidlc/.aidlc-unit-releases/\naidlc/.aidlc-unit-merges/\n",
+      "aidlc/.aidlc-unit-releases/\naidlc/.aidlc-unit-merges/\n" +
+      // Matches the real shipped .gitignore: active-memory/ is the engine's
+      // own local copy of the active space's method, and hooks-health/ (at
+      // any depth under .aidlc-engine/) carries per-clone hook heartbeats -
+      // both real hooks (e.g. session-start) can create on first run in a
+      // checkout this fixture never ran them in before. .aidlc-engine/
+      // itself stays tracked: reviewAuditExtras writes review records there.
+      "aidlc/active-memory/\n**/.aidlc-engine/hooks-health/\n",
   );
   git(seed, ["init", "-b", "main"]);
   git(seed, ["config", "user.name", "main"]);
@@ -438,6 +445,10 @@ export function prepareCandidate(
     /** The recorded Plan Approval answer line; the engine's recorder writes the
      *  chosen option with its letter by default. */
     answerLine?: string;
+    /** Runs right after claim, before any stage work or audit receipt is
+     *  written - lets a case mint a real event (e.g. a session-start hook)
+     *  into the fresh checkout's shard before anything else exists there. */
+    afterClaim?: (checkout: string) => void;
   } = {},
 ): {
   checkout: string;
@@ -449,6 +460,7 @@ export function prepareCandidate(
   if (options.crlf) git(checkout, ["config", "core.autocrlf", "false"]);
   const claim = runMergeTool(UNIT, ["claim", unit, "--team", label], checkout);
   expect(claim.status, claim.out).toBe(0);
+  options.afterClaim?.(checkout);
   const claimPayload = JSON.parse(claim.stdout);
   const generation = claimPayload.generation as number;
   const intentUuid = claimPayload.intent_uuid as string;
@@ -634,7 +646,12 @@ export function prepareCandidate(
     );
   }
   const auditShard = auditShardName(checkout);
-  writeFileSync(join(seededAuditDir(checkout), auditShard), audit);
+  const shardPath = join(seededAuditDir(checkout), auditShard);
+  // afterClaim may have already minted a real event into this shard (e.g. a
+  // session-start hook): keep it rather than clobber it, so a case can put a
+  // real event ahead of these hand-written receipts.
+  const priorShard = existsSync(shardPath) ? readFileSync(shardPath, "utf-8") : "";
+  writeFileSync(shardPath, priorShard + audit);
   git(checkout, ["add", "-A"]);
   git(checkout, ["commit", "-m", `complete ${unit}`]);
   const published = runMergeTool(UNIT, ["publish", unit], checkout);
