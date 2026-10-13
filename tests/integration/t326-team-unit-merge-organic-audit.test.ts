@@ -114,4 +114,27 @@ describe("t326 pinned team Unit merge: organic audit noise", () => {
     const pin = runMergeTool(UNIT, ["pin", "alpha"], seed);
     expect(pin.status, pin.out).toBe(0);
   });
+
+  test("a noise event minted before any Unit work still lets the candidate publish and pin", () => {
+    // A fresh checkout's very first shard write is typically a real
+    // session-start, before any Unit work exists yet: the one-line shard
+    // header has no `---` separator before the first block, so it is fused
+    // to that first block's own text. Pin this ordering specifically, since
+    // every other case here (and the hand-written t326 fixtures generally)
+    // happens to append noise AFTER the real receipts, never before.
+    const { seed, remote } = makeSeed();
+    const candidate = prepareCandidate(remote, "alpha", "alpha-noise-first", {
+      afterClaim: (checkout) => {
+        fireHook(SESSION_START_HOOK, checkout, { source: "startup" });
+      },
+    });
+
+    const shardPath = join(seededAuditDir(candidate.checkout), candidate.auditShard);
+    const shardBeforePublish = readFileSync(shardPath, "utf-8");
+    expect(shardBeforePublish.startsWith("# AI-DLC Audit Log\n\n## Session Start\n"))
+      .toBe(true);
+
+    const pin = runMergeTool(UNIT, ["pin", "alpha"], seed);
+    expect(pin.status, pin.out).toBe(0);
+  });
 });
