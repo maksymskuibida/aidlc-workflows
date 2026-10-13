@@ -221,10 +221,14 @@ describe("t326 pinned team Unit merge", () => {
     const pin = runMergeTool(UNIT, ["pin", "alpha"], fixture.seed);
     expect(pin.status).not.toBe(0);
     expect(pin.out).toContain(alpha.auditShard);
-    expect(pin.out).toContain("HUMAN_TURN");
+    // The forged Human Turn and Question Answer rows are ordinary session
+    // noise by shape (publish cannot tell forged from organic), so publish
+    // drops them before pin ever sees this shard - same as a real session's
+    // own HUMAN_TURN/QUESTION_ANSWERED rows. The forged merge/dispatch rows
+    // below carry no such organic cover (nothing in normal claimed-checkout
+    // operation ever writes them), so they still reach pin and still refuse.
     expect(pin.out).toContain("main-authority evidence");
     expect(pin.out).toContain("receipt belongs to Unit beta");
-    expect(pin.out).toContain("QUESTION_ANSWERED");
     expect(pin.out).toContain("SUMMARY_CONFIRMATION_RECORDED");
     expect(pin.out).toContain("AUTONOMY_MODE_SET");
     expect(pin.out).toContain("WORKFLOW_STARTED");

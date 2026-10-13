@@ -446,6 +446,40 @@ function currentClaim(
 const NO_GIT_IDENTITY =
   /identity unknown|Please tell me who you are|auto-detect email|no (?:email|name) was given/i;
 
+// Builds a tree equal to `baseTreeOid` but with `path` replaced (or added) by
+// `content`, via a scratch index so the real worktree/index is untouched.
+function writeTreeWithBlob(
+  projectDir: string,
+  baseTreeOid: string,
+  path: string,
+  content: string,
+): string {
+  const scratch = mkdtempSync(join(tmpdir(), "aidlc-unit-tree-"));
+  const index = join(scratch, "index");
+  try {
+    const env = { GIT_INDEX_FILE: index };
+    const read = git(projectDir, ["read-tree", baseTreeOid], env);
+    if (!read.ok) fail(`git read-tree failed: ${read.stderr.trim()}`);
+    const blob = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+      cwd: projectDir,
+      encoding: "utf-8",
+      input: content,
+    });
+    if (blob.status !== 0) fail(`git hash-object failed: ${(blob.stderr ?? "").trim()}`);
+    const update = git(
+      projectDir,
+      ["update-index", "--add", "--cacheinfo", `100644,${(blob.stdout ?? "").trim()},${path}`],
+      env,
+    );
+    if (!update.ok) fail(`git update-index failed: ${update.stderr.trim()}`);
+    const tree = git(projectDir, ["write-tree"], env);
+    if (!tree.ok) fail(`git write-tree failed: ${tree.stderr.trim()}`);
+    return tree.stdout.trim();
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 function createClaimCommit(
   projectDir: string,
   parentOid: string,
@@ -453,58 +487,41 @@ function createClaimCommit(
   sourceTreeOid?: string,
   additionalParentOid?: string,
 ): string {
-  const scratch = mkdtempSync(join(tmpdir(), "aidlc-unit-claim-"));
-  const index = join(scratch, "index");
-  try {
-    // The claim is the person's own commit: their git name, email and signing
-    // settings apply as they do to any commit they make, so a remote that
-    // matches the committer to the pusher accepts it, and the claim history
-    // shows who claimed.
-    const env = { GIT_INDEX_FILE: index };
-    const read = git(projectDir, ["read-tree", sourceTreeOid ?? parentOid], env);
-    if (!read.ok) fail(`git read-tree failed: ${read.stderr.trim()}`);
-    const blob = spawnSync("git", ["hash-object", "-w", "--stdin"], {
-      cwd: projectDir,
-      encoding: "utf-8",
-      input: `${JSON.stringify(payload, null, 2)}\n`,
-    });
-    if (blob.status !== 0) fail(`git hash-object failed: ${(blob.stderr ?? "").trim()}`);
-    const update = git(
-      projectDir,
-      ["update-index", "--add", "--cacheinfo", `100644,${(blob.stdout ?? "").trim()},${CLAIM_FILE}`],
-      env,
-    );
-    if (!update.ok) fail(`git update-index failed: ${update.stderr.trim()}`);
-    const tree = git(projectDir, ["write-tree"], env);
-    if (!tree.ok) fail(`git write-tree failed: ${tree.stderr.trim()}`);
-    // commit-tree does not read commit.gpgsign on its own; porcelain commits do.
-    const signed =
-      git(projectDir, ["config", "--type=bool", "commit.gpgsign"]).stdout.trim() === "true";
-    const commitArgs = [
-      "commit-tree",
-      tree.stdout.trim(),
-      "-p",
-      parentOid,
-      ...(additionalParentOid ? ["-p", additionalParentOid] : []),
-      ...(signed ? ["-S"] : []),
-      "-m",
-      `aidlc unit ${payload.status}: ${payload.unit} generation ${payload.generation}`,
-    ];
-    const commit = git(projectDir, commitArgs, env);
-    if (!commit.ok) {
-      if (NO_GIT_IDENTITY.test(commit.stderr)) {
-        fail(
-          "Git has no name and email for your commits yet. Set them with " +
-            'git config --global user.name "Your Name" and git config --global user.email "you@example.com", ' +
-            "then run the command again.",
-        );
-      }
-      fail(`git commit-tree failed: ${commit.stderr.trim()}`);
+  // The claim is the person's own commit: their git name, email and signing
+  // settings apply as they do to any commit they make, so a remote that
+  // matches the committer to the pusher accepts it, and the claim history
+  // shows who claimed.
+  const tree = writeTreeWithBlob(
+    projectDir,
+    sourceTreeOid ?? parentOid,
+    CLAIM_FILE,
+    `${JSON.stringify(payload, null, 2)}\n`,
+  );
+  // commit-tree does not read commit.gpgsign on its own; porcelain commits do.
+  const signed =
+    git(projectDir, ["config", "--type=bool", "commit.gpgsign"]).stdout.trim() === "true";
+  const commitArgs = [
+    "commit-tree",
+    tree,
+    "-p",
+    parentOid,
+    ...(additionalParentOid ? ["-p", additionalParentOid] : []),
+    ...(signed ? ["-S"] : []),
+    "-m",
+    `aidlc unit ${payload.status}: ${payload.unit} generation ${payload.generation}`,
+  ];
+  const commit = git(projectDir, commitArgs);
+  if (!commit.ok) {
+    if (NO_GIT_IDENTITY.test(commit.stderr)) {
+      fail(
+        "Git has no name and email for your commits yet. Set them with " +
+          'git config --global user.name "Your Name" and git config --global user.email "you@example.com", ' +
+          "then run the command again.",
+      );
     }
-    return commit.stdout.trim();
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    fail(`git commit-tree failed: ${commit.stderr.trim()}`);
   }
+  return commit.stdout.trim();
 }
 
 // What the remote said when it refused a push: its own `remote:` lines, then
@@ -1260,6 +1277,69 @@ function transportedAuditViolation(
   return `${event.event} is not in the transported Unit evidence allowlist`;
 }
 
+// Mirrors appendAuditBlockAtPath's on-disk shape: a one-line preamble (only
+// ever written once, fused with the first block since no `\n---\n` separates
+// them), then every block as `\n---\n`-joined `renderAuditBlock` output.
+const AUDIT_SHARD_HEADER = "# AI-DLC Audit Log\n";
+
+// A claimed checkout's own shard also collects ordinary session noise
+// (appendAuditEntry has no notion of a claimed checkout: session lifecycle,
+// human turns, interview answers, sensors, subagent tracking, doctor, and
+// guard refusals all land in the SAME per-clone shard as the Unit's attempt
+// receipts). None of these carry main's own merge/dispatch authority, unlike
+// isTransportedMainAuthority's UNIT_MERGED/MERGE_DISPATCH_*/merge-scope gates
+// below, which stay hard pin-time violations: nothing in a claimed checkout's
+// normal operation ever writes those, so their presence is still exactly as
+// suspicious as before, and transportedAuditViolation keeps rejecting them
+// unchanged. This set drops only the events a real session organically
+// writes, so publish ships a shard pin's own allowlist already accepts
+// instead of a candidate real sessions can never actually publish.
+const TRANSPORTED_NOISE_EVENTS = new Set([
+  "HUMAN_TURN",
+  "QUESTION_ANSWERED",
+  "SESSION_STARTED",
+  "SESSION_RESUMED",
+  "SESSION_ENDED",
+  "SENSOR_FIRED",
+  "SUBAGENT_COMPLETED",
+  "HEALTH_CHECKED",
+  "GUARDRAIL_LOADED",
+  "DECISION_RECORDED",
+  "PLAN_APPROVAL_BLOCKED",
+  "REVIEWER_SCOPE_BLOCKED",
+  "ERROR_LOGGED",
+]);
+
+function transportableAuditShardText(content: string): string {
+  const hasHeader = content.startsWith(AUDIT_SHARD_HEADER);
+  const body = hasHeader ? content.slice(AUDIT_SHARD_HEADER.length) : content;
+  const kept = body.split(/\n---\n/).filter((block) => {
+    if (block.trim().length === 0) return true;
+    const event = auditBlockField(block, "Event");
+    if (!event) return true;
+    return !TRANSPORTED_NOISE_EVENTS.has(event);
+  });
+  return (hasHeader ? AUDIT_SHARD_HEADER : "") + kept.join("\n---\n");
+}
+
+// Drops ordinary session noise from the claimed checkout's own audit shard
+// inside `treeOid`, returning a tree equal to `treeOid` except for that one
+// blob (or `treeOid` itself when there is nothing to drop). The clone's own
+// git history keeps the untouched shard; only the tree about to be published
+// for pin's inspection is filtered.
+function transportableCandidateTree(
+  projectDir: string,
+  treeOid: string,
+  recordPrefix: string,
+): string {
+  const shardPath = `${recordPrefix}/audit/${auditShardName(projectDir)}`;
+  if (!gitPathExistsAt(projectDir, treeOid, shardPath)) return treeOid;
+  const content = gitTextAt(projectDir, treeOid, shardPath);
+  const filtered = transportableAuditShardText(content);
+  if (filtered === content) return treeOid;
+  return writeTreeWithBlob(projectDir, treeOid, shardPath, filtered);
+}
+
 function candidateBoundary(
   projectDir: string,
   baseOid: string,
@@ -1693,11 +1773,17 @@ function publishUnit(args: string[], projectDir?: string): void {
     fail(`Unit "${unit}" claim is stale or released; publication refused.`);
   }
   const headOid = gitOutput(pd, ["rev-parse", "HEAD"], "Cannot resolve candidate HEAD");
-  const headTree = gitOutput(
+  const rawHeadTree = gitOutput(
     pd,
     ["rev-parse", "HEAD^{tree}"],
     "Cannot resolve candidate tree",
   );
+  const recordPrefix = relativeRecordDir(pd);
+  if (!recordPrefix) fail("Cannot resolve the active intent record for publication.");
+  // This clone's own shard carries ordinary session noise, not just the
+  // Unit's attempt receipts (see TRANSPORTED_NOISE_EVENTS); drop it before it
+  // becomes the published tree, so a real session's shard publishes clean.
+  const headTree = transportableCandidateTree(pd, rawHeadTree, recordPrefix);
   const integration = fetchIntegration(pd);
   const integrationIsAncestor = localGit(
     pd,
