@@ -20,6 +20,7 @@ import {
   activeSpace,
   artifactFilename,
   auditBlockField,
+  auditShardBlocks,
   auditShardName,
   type AuditShardEvent,
   type CachedUnitClaim,
@@ -979,9 +980,7 @@ function candidateAuditEvents(
   shards: string[],
 ): CandidateAuditEvent[] {
   const events = shards.flatMap((path, shardIndex) =>
-    gitTextAt(projectDir, oid, path)
-      .replace(/\r\n/g, "\n")
-      .split(/\n---\n/)
+    auditShardBlocks(gitTextAt(projectDir, oid, path))
       .filter((block) => block.trim().length > 0)
       .map((block, pos): CandidateAuditEvent | null => {
         const event = auditBlockField(block, "Event");
@@ -1282,62 +1281,95 @@ function transportedAuditViolation(
 // them), then every block as `\n---\n`-joined `renderAuditBlock` output.
 const AUDIT_SHARD_HEADER = "# AI-DLC Audit Log\n";
 
-// A claimed checkout's own shard also collects ordinary session noise
-// (appendAuditEntry has no notion of a claimed checkout: session lifecycle,
-// human turns, interview answers, sensors, subagent tracking, doctor, and
-// guard refusals all land in the SAME per-clone shard as the Unit's attempt
-// receipts). None of these carry main's own merge/dispatch authority, unlike
-// isTransportedMainAuthority's UNIT_MERGED/MERGE_DISPATCH_*/merge-scope gates
-// below, which stay hard pin-time violations: nothing in a claimed checkout's
-// normal operation ever writes those, so their presence is still exactly as
-// suspicious as before, and transportedAuditViolation keeps rejecting them
-// unchanged. This set drops only the events a real session organically
-// writes, so publish ships a shard pin's own allowlist already accepts
-// instead of a candidate real sessions can never actually publish.
-const TRANSPORTED_NOISE_EVENTS = new Set([
-  "HUMAN_TURN",
-  "QUESTION_ANSWERED",
-  "SESSION_STARTED",
-  "SESSION_RESUMED",
-  "SESSION_ENDED",
-  "SENSOR_FIRED",
-  "SUBAGENT_COMPLETED",
-  "HEALTH_CHECKED",
-  "GUARDRAIL_LOADED",
-  "DECISION_RECORDED",
-  "PLAN_APPROVAL_BLOCKED",
-  "REVIEWER_SCOPE_BLOCKED",
-  "ERROR_LOGGED",
-]);
-
-function transportableAuditShardText(content: string): string {
-  const hasHeader = content.startsWith(AUDIT_SHARD_HEADER);
-  const body = hasHeader ? content.slice(AUDIT_SHARD_HEADER.length) : content;
-  const kept = body.split(/\n---\n/).filter((block) => {
+// A claimed checkout's own shard carries far more than the Unit's attempt
+// receipts, because appendAuditEntry has no notion of a claimed checkout:
+// session lifecycle, a typed prompt, an answered question box, sensors,
+// subagent tracking, doctor and guard refusals all land in the SAME shard.
+// Publish ships exactly the evidence pin accepts, so a real session's shard
+// publishes clean.
+//
+// transportedAuditViolation is the ONE owner of what transports: this projects
+// the shard onto that same predicate rather than restating it as a second
+// list, so no event type can be ordinary in a session yet fatal at pin (of 118
+// valid event types only a handful are transportable, and a list here would
+// silently block every type absent from both). Parsed exactly as
+// candidateAuditEvents parses it - CRLF normalised, blank blocks skipped - so
+// publish and pin can never disagree about a block.
+//
+// PROVISIONAL. This compensates at publish for a conflation at write time, and
+// for an authority model that is not expressed: a transported shard's rows are
+// refused by type because nothing records whose shard a row came from. When
+// authority is scoped by provenance, pin can select its evidence instead of
+// refusing a whole file, and this projection should be DELETED rather than
+// kept alongside it.
+//
+// Returns null when nothing is dropped, so an untouched shard keeps its own
+// bytes (a CRLF candidate is not rewritten to LF for no reason).
+function transportableAuditShardText(
+  content: string,
+  unit: string,
+  generation: number,
+): { text: string; withheld: number } | null {
+  // auditShardBlocks is the grammar the candidate walk splits with, so these
+  // are the same blocks, with the same bytes, in the same order pin reads.
+  const blocks = auditShardBlocks(content);
+  const keep = blocks.map((block, pos) => {
+    // The candidate walk drops both before it evaluates anything, so neither
+    // is ever a violation; the trailing blank block carries the last separator.
     if (block.trim().length === 0) return true;
     const event = auditBlockField(block, "Event");
     if (!event) return true;
-    return !TRANSPORTED_NOISE_EVENTS.has(event);
+    return transportedAuditViolation(
+      {
+        event,
+        block,
+        timestamp: auditBlockField(block, "Timestamp") ?? "",
+        shard: "",
+        shardIndex: 0,
+        pos,
+      },
+      unit,
+      generation,
+    ) === null;
   });
-  return (hasHeader ? AUDIT_SHARD_HEADER : "") + kept.join("\n---\n");
+  const withheld = keep.filter((kept) => !kept).length;
+  if (withheld === 0) return null;
+  const kept = blocks.filter((_, pos) => keep[pos]).join("\n---\n");
+  // The shard's one-line header is written once, with no separator after it,
+  // so it rides inside the first block rather than standing on its own. It
+  // survives that block being withheld: each rendered block opens with its
+  // own newline, so prepending the header reproduces the on-disk shape.
+  const headerWithheld = blocks.length > 0 && !keep[0] &&
+    blocks[0].startsWith(AUDIT_SHARD_HEADER);
+  return {
+    text: headerWithheld ? AUDIT_SHARD_HEADER + kept : kept,
+    withheld,
+  };
 }
 
-// Drops ordinary session noise from the claimed checkout's own audit shard
-// inside `treeOid`, returning a tree equal to `treeOid` except for that one
-// blob (or `treeOid` itself when there is nothing to drop). The clone's own
-// git history keeps the untouched shard; only the tree about to be published
-// for pin's inspection is filtered.
+// Projects the claim-bound audit shard inside `treeOid` onto the transportable
+// evidence, returning a tree equal to `treeOid` except for that one blob. The
+// clone's own history and working copy keep the whole shard; only the tree
+// about to be published is projected.
 function transportableCandidateTree(
   projectDir: string,
   treeOid: string,
   recordPrefix: string,
-): string {
-  const shardPath = `${recordPrefix}/audit/${auditShardName(projectDir)}`;
-  if (!gitPathExistsAt(projectDir, treeOid, shardPath)) return treeOid;
+  auditShard: string,
+  unit: string,
+  generation: number,
+): { tree: string; withheld: number } {
+  const shardPath = `${recordPrefix}/audit/${auditShard}`;
+  if (!gitPathExistsAt(projectDir, treeOid, shardPath)) {
+    return { tree: treeOid, withheld: 0 };
+  }
   const content = gitTextAt(projectDir, treeOid, shardPath);
-  const filtered = transportableAuditShardText(content);
-  if (filtered === content) return treeOid;
-  return writeTreeWithBlob(projectDir, treeOid, shardPath, filtered);
+  const projected = transportableAuditShardText(content, unit, generation);
+  if (!projected) return { tree: treeOid, withheld: 0 };
+  return {
+    tree: writeTreeWithBlob(projectDir, treeOid, shardPath, projected.text),
+    withheld: projected.withheld,
+  };
 }
 
 function candidateBoundary(
@@ -1780,10 +1812,24 @@ function publishUnit(args: string[], projectDir?: string): void {
   );
   const recordPrefix = relativeRecordDir(pd);
   if (!recordPrefix) fail("Cannot resolve the active intent record for publication.");
-  // This clone's own shard carries ordinary session noise, not just the
-  // Unit's attempt receipts (see TRANSPORTED_NOISE_EVENTS); drop it before it
-  // becomes the published tree, so a real session's shard publishes clean.
-  const headTree = transportableCandidateTree(pd, rawHeadTree, recordPrefix);
+  // The shard the claim bound at claim time, which is the one pin inspects
+  // (candidateEvidence fails without it). Reading it from the claim rather
+  // than resolving a name here keeps one owner for the shard's identity.
+  const auditShard = current.payload.audit_shard;
+  if (!auditShard || !/^[A-Za-z0-9._-]+\.md$/.test(auditShard)) {
+    fail(
+      `Unit "${unit}" claim has no bound audit shard; release and re-claim it before publishing again.`,
+    );
+  }
+  const projected = transportableCandidateTree(
+    pd,
+    rawHeadTree,
+    recordPrefix,
+    auditShard,
+    unit,
+    current.generation,
+  );
+  const headTree = projected.tree;
   const integration = fetchIntegration(pd);
   const integrationIsAncestor = localGit(
     pd,
@@ -1809,6 +1855,7 @@ function publishUnit(args: string[], projectDir?: string): void {
       unit,
       candidate_oid: current.oid,
       generation: current.generation,
+      local_rows_withheld: projected.withheld,
     }));
     return;
   }
@@ -1847,6 +1894,9 @@ function publishUnit(args: string[], projectDir?: string): void {
     candidate_oid: published.oid,
     candidate_head_oid: headOid,
     generation: published.generation,
+    // Said rather than done quietly: the candidate carries the Unit's evidence,
+    // and this many of the clone's own local rows stayed behind.
+    local_rows_withheld: projected.withheld,
   }));
 }
 

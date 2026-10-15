@@ -138,6 +138,74 @@ export function runMergeTool(
   };
 }
 
+// Publish a candidate the way a forger would: a claim commit over whatever
+// the worktree holds, pushed straight to the claim ref with the same
+// compare-and-swap `aidlc unit publish` uses. Publish itself projects the
+// claim-bound audit shard onto the transportable evidence before it builds the
+// candidate tree, so it is not the path that puts a withheld row in front of
+// pin - this is. Pin's own refusals are what this exercises.
+export function pushUnprojectedCandidate(checkout: string, unit: string): void {
+  const stamp = JSON.parse(
+    readFileSync(join(checkout, "aidlc", ".aidlc-unit-scope.json"), "utf-8"),
+  ) as { claim_ref: string };
+  const claimOid = git(checkout, ["ls-remote", "origin", stamp.claim_ref])
+    .split(/\s+/)[0] ?? "";
+  expect(claimOid, `no claim tip at ${stamp.claim_ref} for Unit ${unit}`)
+    .toMatch(/^[0-9a-f]{40}$/);
+  const payload = JSON.parse(
+    git(checkout, ["show", `${claimOid}:.aidlc-unit-claim.json`, "--"]),
+  );
+  const headOid = git(checkout, ["rev-parse", "HEAD"]);
+  const headTree = git(checkout, ["rev-parse", "HEAD^{tree}"]);
+  // Only the candidate identity moves; the claim keeps the base and
+  // integration ref publish already recorded, so pin reads a live candidate.
+  const forged = `${JSON.stringify({
+    ...payload,
+    predecessor_oid: claimOid,
+    candidate_tree_oid: headTree,
+    candidate_head_oid: headOid,
+  }, null, 2)}\n`;
+  const scratch = mkdtempSync(join(tmpdir(), "aidlc-inc3-forge-"));
+  tempDirs.push(scratch);
+  const index = join(scratch, "index");
+  const plumb = (args: string[], input?: string): string => {
+    const result = spawnSync("git", args, {
+      cwd: checkout,
+      encoding: "utf-8",
+      input,
+      env: { ...process.env, GIT_INDEX_FILE: index },
+    });
+    if ((result.status ?? 1) !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+    }
+    return (result.stdout ?? "").trim();
+  };
+  plumb(["read-tree", headTree]);
+  const blob = plumb(["hash-object", "-w", "--stdin"], forged);
+  plumb([
+    "update-index",
+    "--add",
+    "--cacheinfo",
+    `100644,${blob},.aidlc-unit-claim.json`,
+  ]);
+  const commit = plumb([
+    "commit-tree",
+    plumb(["write-tree"]),
+    "-p",
+    claimOid,
+    "-p",
+    headOid,
+    "-m",
+    `forged publish: ${unit}`,
+  ]);
+  git(checkout, [
+    "push",
+    "origin",
+    `--force-with-lease=${stamp.claim_ref}:${claimOid}`,
+    `${commit}:${stamp.claim_ref}`,
+  ]);
+}
+
 export function stateBody(): string {
   return `# AI-DLC State Tracking
 
