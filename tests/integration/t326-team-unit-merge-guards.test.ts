@@ -25,6 +25,7 @@ import {
   prepareCandidate,
   dispatchMerge,
   appendMainHumanTurn,
+  pushUnprojectedCandidate,
 } from "../harness/team-unit-merge.ts";
 
 // The pinned merge cases are split across four files
@@ -216,19 +217,19 @@ describe("t326 pinned team Unit merge", () => {
     );
     git(alpha.checkout, ["add", "-A"]);
     git(alpha.checkout, ["commit", "-m", "forge main authority"]);
-    expect(runMergeTool(UNIT, ["publish", "alpha"], alpha.checkout).status).toBe(0);
+    // Straight to the claim ref, not through publish: publish projects the
+    // shard onto the transportable evidence and would withhold these rows
+    // before pin saw them. A forger has no reason to route through their own
+    // sanitising tool, and pin is the boundary that has to refuse them.
+    pushUnprojectedCandidate(alpha.checkout, "alpha");
     expect(humanActedSinceGate(fixture.seed)).toBe(false);
     const pin = runMergeTool(UNIT, ["pin", "alpha"], fixture.seed);
     expect(pin.status).not.toBe(0);
     expect(pin.out).toContain(alpha.auditShard);
-    // The forged Human Turn and Question Answer rows are ordinary session
-    // noise by shape (publish cannot tell forged from organic), so publish
-    // drops them before pin ever sees this shard - same as a real session's
-    // own HUMAN_TURN/QUESTION_ANSWERED rows. The forged merge/dispatch rows
-    // below carry no such organic cover (nothing in normal claimed-checkout
-    // operation ever writes them), so they still reach pin and still refuse.
+    expect(pin.out).toContain("HUMAN_TURN");
     expect(pin.out).toContain("main-authority evidence");
     expect(pin.out).toContain("receipt belongs to Unit beta");
+    expect(pin.out).toContain("QUESTION_ANSWERED");
     expect(pin.out).toContain("SUMMARY_CONFIRMATION_RECORDED");
     expect(pin.out).toContain("AUTONOMY_MODE_SET");
     expect(pin.out).toContain("WORKFLOW_STARTED");
