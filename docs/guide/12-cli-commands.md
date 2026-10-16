@@ -50,6 +50,8 @@ diagnostic and lifecycle routes.
 | `/aidlc unit pin <unit>` | Pin and validate one completed candidate OID from unscoped main |
 | `/aidlc unit gate <unit> ...` | Record the merge decision against the pinned OID and generation |
 | `/aidlc unit land <unit> ...` | Run the resumable git → state → audit landing transaction |
+| `/aidlc unit pr <unit> [--repo <name>] [--draft]` | Open the Unit's code or workspace pull request through `gh` (strategy `pr`) |
+| `/aidlc unit finish <unit> [--accept-merged-drift --user-input <text>]` | Verify the merged pull request against the landed head and end the checkout's scope (strategy `pr`) |
 | `/aidlc unit merge-status <unit>` | Read the local pinned-merge transaction journal |
 | `/aidlc unit status` | Read the current claimable, claimed, and dependency-blocked Unit sets |
 | `/aidlc --doctor [--check-updates]` | Run a health check; the explicit flag refreshes update metadata |
@@ -697,6 +699,60 @@ commit, inspect that commit and acknowledge the exceptional completion:
 The command accepts only the immediate tombstone whose predecessor is the
 pinned OID, records the acknowledgment in the main audit and transaction
 journal, and refuses a successor claim.
+
+### `/aidlc unit pr <unit>` — Open the Unit's pull requests (strategy `pr`)
+
+Where `main` takes only reviewed pull requests (the dispatch returned strategy
+`pr`), the Unit's checkout opens its pull requests through `gh`:
+
+```bash
+/aidlc unit pr user-profile-api --repo api        # a code repository's branch, before gate
+/aidlc unit pr user-profile-api                   # the workspace branch, after land
+/aidlc unit pr user-profile-api --draft
+```
+
+The title is `[<ticket>] <Unit title>` when the Unit's name starts with a
+ticket key (`DEMO-42-alpha`), the body is the repository's own pull request
+template with its `Ticket:` line filled and an `## AI-DLC Unit` section
+appended; every other heading stays for the person. A repository without a
+template refuses. The branch must be pushed. Each reference is recorded beside
+the merge journal: `gate` reads the code pull requests from there (`--pr`
+overrides), `finish` reads the workspace one. A code pull request must be
+merged; it must also be approved on GitHub when the project records
+`aidlc config flags --pull-request-approval on --project` (off by default), and
+the gate row names the approvers it finds either way.
+
+### `/aidlc unit finish <unit>` — Close the checkout once its pull request merged
+
+```bash
+/aidlc unit finish user-profile-api
+/aidlc unit finish user-profile-api --pr acme/workspace#42
+```
+
+Finish reads the workspace pull request (recorded by `pr`, or named with
+`--pr`), requires it merged with its merge commit on the integration branch,
+and compares what merged with the head `land` left behind, path by path. When
+they match it marks the journal `finished`, deletes the Unit's claim ref from
+the remote (the merged pull request, the audit rows and the journal are the
+record; a stale checkout still fails closed), removes the checkout's scope
+stamp, and: in a main checkout, switches the workspace and every recorded
+code repository to the integration branch and fast-forwards them (`next` then
+picks the next Unit); in a worktree, prints the one command that removes the
+worktrees and their branches, child repositories first. Content merged after
+land is refused with the differing paths; a person who inspected it accepts
+it with:
+
+```bash
+/aidlc unit finish user-profile-api --accept-merged-drift \
+  --user-input "I compared the merged review fix with the landed head and accept it"
+```
+
+which records `UNIT_MERGE_DRIFT_ACCEPTED` in this checkout's audit shard,
+commits it on a branch cut from the integration tip, and opens a record-only
+follow-up pull request for it. A claim from a checkout still scoped to a
+merged Unit is refused until that Unit is finished. A checkout whose Unit was
+landed from another checkout, or whose claim was released or superseded, has
+nothing to verify: finish ends its scope the same way and says so.
 
 ### `/aidlc unit status` — Inspect Unit claims
 
