@@ -1391,7 +1391,7 @@ describe("t324 team-owned unit progress and per-unit gates", () => {
     expect(audit).toContain("**Event**: UNIT_GATE_RHYTHM_SET");
   }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
 
-  test("team ownership rejects recorded workspace repos before changing state", () => {
+  test("team ownership is set for an intent that records workspace repos", () => {
     const proj = seedProject();
     const registryPath = join(
       proj,
@@ -1409,15 +1409,14 @@ describe("t324 team-owned unit progress and per-unit gates", () => {
     const stateBefore = state(proj);
     const auditBefore = readAllAuditShards(proj);
 
+    // Each team's Unit lands through the repositories' pull requests (strategy
+    // pr), so work across repositories is staffed like any other.
     const result = runState(proj, ["set-unit-ownership", "team"]);
-    expect(result.rc).not.toBe(0);
-    expect(result.out).toContain("This work spans 2 repos, so this session builds its Units: teams each owning a " +
-      "Unit is not available yet for work across repos. Carry on with `/aidlc`.");
-    expect(state(proj)).toBe(stateBefore);
-    expect(readAllAuditShards(proj)).toContain("**Event**: ERROR_LOGGED");
-    expect(readAllAuditShards(proj)).not.toContain(
-      "**Event**: UNIT_OWNERSHIP_SET",
-    );
+    expect(result.rc, result.out).toBe(0);
+    expect(state(proj)).not.toBe(stateBefore);
+    expect(state(proj)).toContain("- **Unit Ownership**: team");
+    expect(readAllAuditShards(proj)).toContain("**Event**: UNIT_OWNERSHIP_SET");
+    expect(readAllAuditShards(proj)).not.toContain("**Event**: ERROR_LOGGED");
     expect(auditBefore).toBe("");
   });
 

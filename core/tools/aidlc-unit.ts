@@ -4,6 +4,7 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   openSync,
@@ -37,6 +38,7 @@ import {
   getField,
   humanPresenceGuardDisabled,
   idSuffix,
+  intentRepos,
   invalidateLiveClaimPayloadCache,
   isNonAnswer,
   isReadOnlyEngineProbe,
@@ -55,11 +57,13 @@ import {
   parseReviewRecordBytes,
   pairedReviewRecordForCompletion,
   relativeRecordDir,
+  repoDir,
   REVIEW_RECORDS_DIR,
   reviewRecordDigest,
   type ReviewRecord,
   requireLiveClaimForTeamUnit,
   resolveProjectDir,
+  resolveProjectFlag,
   resolveReviewClass,
   selfAttributedDecisionMarker,
   teamSkeletonOn,
@@ -71,6 +75,7 @@ import {
   unitLifecycleSnapshot,
   unitDependencyPath,
   unitMergedReceipts,
+  unitMergeTransactionPath,
   unitMajorConstructionStageSlugs,
   unitParticipantPath,
   unitReleasePendingPath,
@@ -81,6 +86,7 @@ import {
   writeStateFile,
   writeUnitScopeStamp,
   writeClaimGeneration,
+  writeFileAtomic,
 } from "./aidlc-lib.js";
 import {
   parseTestingContract,
@@ -1239,6 +1245,15 @@ const TRANSPORTED_DATA_EVENTS = new Set([
 ]);
 
 function isTransportedMainAuthority(event: CandidateAuditEvent): boolean {
+  // A Unit's own merge gate is main-authority evidence wherever it was
+  // written: under strategy pr it is written in the Unit's own checkout, so
+  // publish withholds it and pin refuses it like a dispatch row.
+  if (
+    (event.event === "GATE_APPROVED" || event.event === "GATE_REJECTED") &&
+    auditBlockField(event.block, "Gate Scope") === "unit-merge"
+  ) {
+    return true;
+  }
   if (
     event.event === "HUMAN_TURN" ||
     event.event === "QUESTION_ANSWERED" ||
@@ -2262,7 +2277,7 @@ function assertTransactionIdentity(
 function requireMergeDispatchDecision(
   projectDir: string,
   transaction: UnitMergeTransaction,
-): { strategy: "merge"; target: string } {
+): { strategy: "merge" | "pr"; target: string } {
   const all = mainAuthorityAuditRows(projectDir);
   if (!transaction.pin_id) {
     fail(`Unit "${transaction.unit}" merge transaction has no pin identity; pin it again.`);
@@ -2321,13 +2336,188 @@ function requireMergeDispatchDecision(
   }
   const strategy = auditBlockField(terminal.block, "Strategy");
   const target = auditBlockField(terminal.block, "Target branch");
-  if (strategy !== "merge") {
+  if (strategy !== "merge" && strategy !== "pr") {
     fail(
-      `Unit "${transaction.unit}" pinned transaction requires merge strategy; dispatch returned "${strategy ?? "missing"}".`,
+      `Unit "${transaction.unit}" pinned transaction requires merge or pr strategy; dispatch returned "${strategy ?? "missing"}".`,
     );
   }
   if (!target) fail(`Unit "${transaction.unit}" merge dispatch omitted its target branch.`);
-  return { strategy: "merge", target };
+  return { strategy, target };
+}
+
+type LandedPullRequest = {
+  ref: string;
+  url: string;
+  repo: string;
+  head: string;
+  merge_commit: string;
+  merged_at: string;
+  approvers: string[];
+};
+
+function ghBinary(): string {
+  return process.env.AIDLC_GH_BIN?.trim() || "gh";
+}
+
+function parsePullRequestRef(ref: string): { owner: string; repo: string; number: string } | null {
+  const match = /^(?:https?:\/\/[^/]+\/)?([^/#\s]+)\/([^/#\s]+?)(?:\/pull\/|#)(\d+)$/.exec(ref);
+  return match ? { owner: match[1], repo: match[2], number: match[3] } : null;
+}
+
+type PullRequestView = {
+  owner: string;
+  repo: string;
+  number: string;
+  url: string;
+  state: string | undefined;
+  mergedAt: string | null;
+  mergeCommit: string | null;
+  headRefOid: string | null;
+  reviewDecision: string | undefined;
+  approvers: string[];
+};
+
+// One pull request as GitHub reports it, read through `gh`.
+function viewPullRequest(ref: string): PullRequestView {
+  const parsed = parsePullRequestRef(ref);
+  if (!parsed) fail(`Pull request "${ref}" is not <owner>/<repo>#<n> or a pull request URL.`);
+  const { owner, repo, number } = parsed;
+  const result = spawnSync(
+    ghBinary(),
+    [
+      "pr",
+      "view",
+      number,
+      "--repo",
+      `${owner}/${repo}`,
+      "--json",
+      "url,state,mergedAt,mergeCommit,headRefOid,reviewDecision,latestReviews",
+    ],
+    { encoding: "utf-8", env: { ...process.env }, timeout: 20_000 },
+  );
+  if (result.status !== 0) {
+    fail(`gh pr view ${ref} failed: ${(result.stderr ?? "").trim() || `exit ${result.status}`}.`);
+  }
+  let view: {
+    url?: string;
+    state?: string;
+    mergedAt?: string | null;
+    mergeCommit?: { oid?: string } | string | null;
+    headRefOid?: string;
+    reviewDecision?: string;
+    latestReviews?: Array<{ state?: string; author?: { login?: string } }>;
+  };
+  try {
+    view = JSON.parse(result.stdout) as typeof view;
+  } catch {
+    fail(`gh pr view ${ref} returned no JSON.`);
+  }
+  const mergeCommit = typeof view.mergeCommit === "string"
+    ? view.mergeCommit
+    : view.mergeCommit?.oid ?? null;
+  return {
+    owner,
+    repo,
+    number,
+    url: view.url ?? ref,
+    state: view.state,
+    mergedAt: view.mergedAt ?? null,
+    mergeCommit: mergeCommit && /^[0-9a-f]{40}$/.test(mergeCommit) ? mergeCommit : null,
+    headRefOid: /^[0-9a-f]{40}$/.test(view.headRefOid ?? "") ? (view.headRefOid as string) : null,
+    reviewDecision: view.reviewDecision,
+    approvers: (view.latestReviews ?? [])
+      .filter((review) => review?.state === "APPROVED")
+      .map((review) => review?.author?.login ?? "")
+      .filter(Boolean),
+  };
+}
+
+// `--pr <owner>/<repo>#<n>[,...]` (or pull request URLs), by default the code
+// pull requests `aidlc unit pr --repo` recorded: one per code repository the
+// Unit changed. Each must be merged, and approved when the project asks for
+// it (`aidlc config flags --pull-request-approval on`); the approvers found
+// are recorded either way. Its repository must be one the intent records, its
+// head commit is what land verifies on that repository's integration branch.
+function pullRequestsFromGitHub(
+  projectDir: string,
+  value: string | undefined,
+): LandedPullRequest[] {
+  const refs = (value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (refs.length === 0) return [];
+  const recorded = new Set(intentRepos(projectDir));
+  const approvalRequired =
+    resolveProjectFlag("AIDLC_PR_REQUIRE_APPROVAL", process.env, projectDir) === "1";
+  return refs.map((ref) => {
+    const view = viewPullRequest(ref);
+    if (!recorded.has(view.repo)) {
+      fail(`--pr "${ref}" names repository "${view.repo}", which this intent does not record.`);
+    }
+    if (view.state !== "MERGED" || !view.mergedAt || !view.mergeCommit) {
+      fail(`Pull request ${ref} is not merged (state ${view.state ?? "unknown"}).`);
+    }
+    if (approvalRequired && view.reviewDecision !== "APPROVED") {
+      fail(
+        `Pull request ${ref} is not approved (review decision ${view.reviewDecision || "none"}); ` +
+          "this project requires approved code pull requests (aidlc config flags --pull-request-approval).",
+      );
+    }
+    if (!view.headRefOid) {
+      fail(`Pull request ${ref} has no usable head or merge commit.`);
+    }
+    return {
+      ref,
+      url: view.url,
+      repo: view.repo,
+      head: view.headRefOid,
+      merge_commit: view.mergeCommit,
+      merged_at: view.mergedAt,
+      approvers: view.approvers,
+    };
+  });
+}
+
+// The pinned Unit's merge gate under strategy pr, in the person's words: what
+// was checked, and what approving does. Approving merges nothing: it lands the
+// Unit on its own branch and opens the workspace pull request, and nothing
+// reaches main until the person merges that. The conductor shows it as given.
+export function pullRequestMergeGateAsk(projectDir: string, unit: string): {
+  context: string;
+  question: string;
+  options: Array<{ label: string; description: string }>;
+} | null {
+  const transaction = readUnitMergeTransaction(projectDir, unit);
+  if (!transaction) return null;
+  const evidence = transaction.evidence;
+  const gates = evidence.gates_approved.length === evidence.gates_expected.length
+    ? `all ${evidence.stages_expected.length} stages are approved`
+    : `${evidence.gates_approved.length} of ${evidence.gates_expected.length} stage approvals are recorded`;
+  const reviews = evidence.reviewers_expected.length === 0
+    ? ""
+    : evidence.reviewers_ready.length === evidence.reviewers_expected.length
+      ? ", every review is READY"
+      : `, ${evidence.reviewers_ready.length} of ${evidence.reviewers_expected.length} reviews are READY`;
+  const code = (readUnitPullRequests(projectDir, unit)?.code ?? []).map((entry) => entry.ref);
+  return {
+    context: `${unit} is ready to land: ${gates}${reviews}` +
+      `${code.length > 0 ? `, and its code is merged (${code.join(", ")})` : ""}.`,
+    question: `Open the workspace pull request that lands ${unit}?`,
+    options: [
+      {
+        label: "Approve",
+        description: "Records your approval, updates the Unit's branch and opens the workspace pull request. " +
+          "Nothing reaches main until you merge it.",
+      },
+      {
+        label: "Reject",
+        description: "Records that you don't want it landed yet; nothing is pushed. Say what should change.",
+      },
+    ],
+  };
+}
+
+function recordedCodePullRequestRefs(projectDir: string, unit: string): string | undefined {
+  const refs = (readUnitPullRequests(projectDir, unit)?.code ?? []).map((entry) => entry.ref);
+  return refs.length > 0 ? refs.join(",") : undefined;
 }
 
 function mergeGateRecord(
@@ -2362,10 +2552,10 @@ function pinUnit(args: string[], projectDir?: string): void {
   const unit = positional[0];
   if (!unit) fail("Usage: aidlc-unit pin <unit>");
   const pd = resolveProjectDir(projectDir);
-  if (readApplicableTeamUnitScopeStamp(pd)) {
-    fail("Unit pinning must run from an unscoped main checkout.");
+  const ownStamp = readApplicableTeamUnitScopeStamp(pd);
+  if (ownStamp && ownStamp.unit !== unit) {
+    fail(`This checkout is scoped to Unit "${ownStamp.unit}"; pin Unit "${unit}" from an unscoped checkout or its own.`);
   }
-  assertMainCheckout(pd);
   const state = readStateFile(pd);
   if (!isTeamUnitOwnership(state)) fail("Unit pinning requires Unit Ownership: team.");
   const identity = activeIdentity(pd);
@@ -2404,6 +2594,7 @@ function pinUnit(args: string[], projectDir?: string): void {
     integration.oid,
   );
   const mainBefore = gitOutput(pd, ["rev-parse", "HEAD"], "Cannot resolve main HEAD");
+  const pinId = randomUUID();
   const transaction: UnitMergeTransaction = {
     version: 1,
     status: "pinned",
@@ -2422,7 +2613,7 @@ function pinUnit(args: string[], projectDir?: string): void {
     integration_branch: integration.branch,
     main_before_oid: mainBefore,
     pinned_at: isoTimestamp(),
-    pin_id: randomUUID(),
+    pin_id: pinId,
     audit_shard: claim.payload.audit_shard,
     evidence,
   };
@@ -2432,11 +2623,12 @@ function pinUnit(args: string[], projectDir?: string): void {
     pinned: true,
     unit,
     pinned_oid: claim.oid,
-    pin_id: transaction.pin_id,
+    pin_id: pinId,
     generation: claim.generation,
     evidence,
     gate_required: true,
     merge_dispatch_required: true,
+    dispatch: mergeDispatchCommands(pd, unit, claim.oid, claim.generation, pinId),
     ...(superseded
       ? { superseded: { pinned_oid: superseded.pinned_oid, status: superseded.status } }
       : {}),
@@ -2467,8 +2659,35 @@ function approvalOutlivedByRepublish(
   ) {
     return false;
   }
+  if (transaction.strategy === "pr") return true;
   if (git(projectDir, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).ok) return false;
-  return firstParentMergeOf(projectDir, transaction) === null;
+  const landed = firstParentMergeOf(projectDir, transaction);
+  return landed === null;
+}
+
+// The dispatch bracket for this pin, its values filled in: the Unit's own
+// checkout lands through pull requests on its branch, unscoped main merges
+// into its own. The three values in angle brackets are the dispatcher's to
+// write: the team practice it read, how sure it is, and a one-line note.
+function mergeDispatchCommands(
+  projectDir: string,
+  unit: string,
+  pinnedOid: string,
+  generation: number,
+  pinId: string,
+): { strategy: "pr" | "merge"; invoked: string; returned: string; note: string } {
+  const strategy = readUnitScopeStamp(projectDir) ? "pr" : "merge";
+  const target = currentBranch(projectDir) || "<branch>";
+  const pin = `--slug ${unit} --pinned-oid ${pinnedOid} --attempt-generation ${generation} --pin-id ${pinId}`;
+  return {
+    strategy,
+    invoked: `aidlc engine bolt dispatch-event --event MERGE_DISPATCH_INVOKED ${pin} ` +
+      "--practices-excerpt '<the team practice on landing>'",
+    returned: `aidlc engine bolt dispatch-event --event MERGE_DISPATCH_RETURNED ${pin} ` +
+      `--strategy ${strategy} --target ${target} --confidence <0-1> --notes '<one line>'`,
+    note: "Run invoked, then returned. Returned prints the merge gate to put to the person; " +
+      `record their answer with aidlc unit gate ${unit}.`,
+  };
 }
 
 function gateUnitMerge(args: string[], projectDir?: string): void {
@@ -2538,6 +2757,12 @@ function gateUnitMerge(args: string[], projectDir?: string): void {
     return;
   }
   const dispatch = requireMergeDispatchDecision(pd, transaction);
+  if (dispatch.strategy !== "pr" && flags.pr) {
+    fail(`--pr applies to the pr strategy; dispatch returned "${dispatch.strategy}".`);
+  }
+  const pullRequests = dispatch.strategy === "pr"
+    ? pullRequestsFromGitHub(pd, flags.pr ?? recordedCodePullRequestRefs(pd, unit))
+    : [];
   appendAuditEntry(
     decision === "approve" ? "GATE_APPROVED" : "GATE_REJECTED",
     {
@@ -2548,6 +2773,14 @@ function gateUnitMerge(args: string[], projectDir?: string): void {
       "Gate Scope": "unit-merge",
       Strategy: dispatch.strategy,
       "Target branch": dispatch.target,
+      ...(dispatch.strategy === "pr"
+        ? {
+            "Pull requests": pullRequests.map((pr) => pr.url).join(", ") || "none",
+            "Code heads": pullRequests.map((pr) => `${pr.repo}=${pr.head}`).join(", ") || "none",
+            "Merge commits": pullRequests.map((pr) => `${pr.repo}=${pr.merge_commit}`).join(", ") || "none",
+            "Approved by": [...new Set(pullRequests.flatMap((pr) => pr.approvers))].join(", ") || "none",
+          }
+        : {}),
       "Outside the unit record tree":
         transaction.evidence.outside_unit_record_paths.join(", ") || "none",
       ...(decision === "approve"
@@ -2563,6 +2796,7 @@ function gateUnitMerge(args: string[], projectDir?: string): void {
     user_input: userInput,
     target_branch: dispatch.target,
     strategy: dispatch.strategy,
+    ...(dispatch.strategy === "pr" ? { pull_requests: pullRequests } : {}),
   });
   console.log(JSON.stringify({
     gated: true,
@@ -2613,7 +2847,8 @@ function conflictFiles(projectDir: string): string[] {
 // What the landing checkout's worktree holds beyond the engine's own merge
 // metadata: `unsafe` is anything a landing must not sweep up (a person's
 // uncommitted source, a stray audit file), `staged` what the checkpoint
-// commits.
+// commits. A stage's observation diary is engine scratch the next run
+// rewrites; it neither blocks the checkpoint nor rides in it.
 function landingWorktreePaths(
   projectDir: string,
 ): { unsafe: string[]; staged: string[] } {
@@ -2643,13 +2878,17 @@ function landingWorktreePaths(
       paths.push(records[++i]);
     }
   }
+  const stageDiary = new RegExp(
+    `^${recordPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/construction/[^/]+/memory\\.md$`,
+  );
   return {
     unsafe: paths.filter(
       (path) =>
         !isEngineMergeMetadata(projectDir, path, recordPrefix) &&
-        path !== `${recordPrefix}/audit/${auditShardName(projectDir)}`,
+        path !== `${recordPrefix}/audit/${auditShardName(projectDir)}` &&
+        !stageDiary.test(path),
     ),
-    staged: paths,
+    staged: paths.filter((path) => !stageDiary.test(path)),
   };
 }
 
@@ -2673,6 +2912,8 @@ function checkpointMainMetadata(
   );
   assertCleanSourceWorktree(projectDir);
   const { staged } = landingWorktreePaths(projectDir);
+  // Only diaries changed: nothing to checkpoint (a refold that found the
+  // rebased branch already current).
   if (staged.length === 0) return { parentOid };
   const added = git(projectDir, ["add", "-A", "--", ...staged]);
   if (!added.ok) {
@@ -2936,6 +3177,150 @@ function validateLandedMerge(
     throw new CandidateExactPolicyError(
       `Unit "${transaction.unit}" merge commit violates candidate-exact policy at: ${inspection.violations.join(", ")}.`,
       { ...inspection, phase: "merge-commit" },
+    );
+  }
+}
+
+// The paths a commit range changed whose blob on `tipOid` differs from the
+// blob on `headOid`: the content a platform merge (squash included) must have
+// carried onto the integration branch. A path absent on both sides matches.
+function contentNotOnTip(
+  repoDir: string,
+  baseOid: string,
+  headOid: string,
+  tipOid: string,
+  skip: (path: string) => boolean = () => false,
+  carries: (path: string) => boolean = () => false,
+): string[] {
+  const changed = gitOutput(
+    repoDir,
+    ["diff", "--name-only", "--no-renames", `${baseOid}..${headOid}`],
+    `Cannot inspect ${baseOid}..${headOid}`,
+  )
+    .split(/\r?\n/)
+    .filter(Boolean);
+  const mismatches: string[] = [];
+  for (const path of changed) {
+    if (skip(path)) continue;
+    const expected = gitObjectAt(repoDir, headOid, path).oid;
+    const actual = gitObjectAt(repoDir, tipOid, path).oid;
+    if (expected !== actual && !carries(path)) mismatches.push(path);
+  }
+  return mismatches;
+}
+
+// The claim-bound audit shard is the one candidate file whose bytes differ
+// by design: publish transports only the Unit's receipts, while the pull
+// request carries the clone's whole file. The integration tip carries the
+// candidate when every transported block appears in its copy verbatim.
+function auditShardCarriesCandidate(
+  projectDir: string,
+  transaction: UnitMergeTransaction,
+  tipOid: string,
+  path: string,
+): boolean {
+  const recordPrefix = relativeRecordDir(projectDir);
+  if (!recordPrefix || !transaction.audit_shard) return false;
+  if (path !== `${recordPrefix}/audit/${transaction.audit_shard}`) return false;
+  if (!gitPathExistsAt(projectDir, tipOid, path)) return false;
+  const expected = gitTextAt(projectDir, transaction.pinned_oid, path);
+  const actual = gitTextAt(projectDir, tipOid, path);
+  // Blocks start at their `## ` heading; the file's own title line is not one.
+  const blocks = expected
+    .split(/\n---\n/)
+    .map((block) => block.replace(/^[\s\S]*?(?=^## )/m, "").trim())
+    .filter((block) => block.startsWith("## "));
+  return blocks.length > 0 && blocks.every((block) => actual.includes(block));
+}
+
+// Pull-request landing: GitHub merged the Unit's code through reviewed pull
+// requests; this step verifies each one on its repository's integration
+// branch (the merge commit is on it, and the head's content is there, squash
+// or not) and records this branch's head as the landing commit. The Unit's
+// record and the fold travel together in this branch's own pull request.
+function landPr(
+  projectDir: string,
+  transaction: UnitMergeTransaction,
+  target: string,
+  landingHead: string,
+): UnitMergeTransaction {
+  assertLandCandidateBoundary(projectDir, transaction);
+  for (const pr of transaction.pull_requests ?? []) {
+    const repoDir = join(projectDir, pr.repo);
+    if (!existsSync(join(repoDir, ".git"))) {
+      fail(`Code repository "${pr.repo}" is not checked out at ${repoDir}.`);
+    }
+    const integration = fetchIntegration(repoDir);
+    for (const oid of [pr.head, pr.merge_commit]) {
+      if (!git(repoDir, ["cat-file", "-e", `${oid}^{commit}`]).ok) {
+        git(repoDir, ["fetch", "--all", "--quiet"]);
+        if (!git(repoDir, ["cat-file", "-e", `${oid}^{commit}`]).ok) {
+          fail(`Commit ${oid} of ${pr.ref} is not available in ${repoDir}; fetch it first.`);
+        }
+      }
+    }
+    if (!git(repoDir, ["merge-base", "--is-ancestor", pr.merge_commit, integration.oid]).ok) {
+      fail(
+        `Merge commit ${pr.merge_commit} of ${pr.ref} is not on ${pr.repo}'s ${integration.branch} at ${integration.oid}.`,
+      );
+    }
+    const base = gitOutput(
+      repoDir,
+      ["merge-base", pr.head, integration.oid],
+      `Cannot find the merge base of ${pr.head} and ${integration.ref} in ${pr.repo}`,
+    );
+    const mismatches = contentNotOnTip(repoDir, base, pr.head, integration.oid);
+    if (mismatches.length > 0) {
+      fail(
+        `Unit "${transaction.unit}" code from ${pr.ref} is not on ${pr.repo}'s ${integration.branch} at: ` +
+          `${mismatches.join(", ")}.`,
+      );
+    }
+  }
+  return {
+    ...transaction,
+    status: "git-landed",
+    target_branch: target,
+    strategy: "pr",
+    git_commit_oid: landingHead,
+    conflict_files: undefined,
+  };
+}
+
+// The state step's re-check of a pull-request landing: the recorded
+// integration tip is on the landing branch and still carries the candidate.
+function validateLandedPr(
+  projectDir: string,
+  transaction: UnitMergeTransaction,
+  commitOid: string,
+  target: string,
+): void {
+  const branch = gitOutput(
+    projectDir,
+    ["branch", "--show-current"],
+    "Cannot resolve landing branch",
+  );
+  if (branch !== target) {
+    fail(`Unit landing expected branch "${target}", found "${branch}".`);
+  }
+  if (!git(projectDir, ["merge-base", "--is-ancestor", commitOid, "HEAD"]).ok) {
+    fail(`Recorded integration tip ${commitOid} is not on ${target}.`);
+  }
+  const recordPrefix = relativeRecordDir(projectDir);
+  const mismatches = contentNotOnTip(
+    projectDir,
+    transaction.candidate_base_oid,
+    transaction.pinned_oid,
+    commitOid,
+    (path) => isEngineMergeMetadata(projectDir, path, recordPrefix),
+    // The Unit's review records ride in the candidate for pin only: they are
+    // git-ignored framework state, so the pull request never carries them.
+    (path) => auditShardCarriesCandidate(projectDir, transaction, commitOid, path) ||
+      (recordPrefix !== null && isUnitReviewRecordPath(path, recordPrefix, transaction.unit)),
+  );
+  if (mismatches.length > 0) {
+    fail(
+      `Unit "${transaction.unit}" integration tip ${commitOid} no longer carries the candidate at: ${mismatches.join(", ")}.`,
     );
   }
 }
@@ -3239,6 +3624,20 @@ function landGit(
   };
 }
 
+// Put the integration branch's state file back on the landing branch, staged,
+// before a pull-request landing's fold.
+function restoreIntegrationState(projectDir: string): void {
+  const recordPrefix = relativeRecordDir(projectDir);
+  if (!recordPrefix) fail("Cannot resolve the active intent record for the state fold.");
+  const integration = fetchIntegration(projectDir);
+  const path = `${recordPrefix}/aidlc-state.md`;
+  if (!gitPathExistsAt(projectDir, integration.oid, path)) {
+    fail(`${integration.ref} at ${integration.oid} holds no ${path} to fold the Unit into.`);
+  }
+  const restored = git(projectDir, ["checkout", integration.oid, "--", path]);
+  if (!restored.ok) fail(`Cannot take ${path} from ${integration.ref}: ${restored.stderr.trim()}`);
+}
+
 function runStateFold(
   projectDir: string,
   transaction: UnitMergeTransaction,
@@ -3379,15 +3778,15 @@ function landUnit(args: string[], projectDir?: string): void {
   if (
     !unit ||
     !["git", "state", "audit", "all"].includes(step) ||
-    (flags.strategy !== undefined && flags.strategy !== "merge")
+    (flags.strategy !== undefined && flags.strategy !== "merge" && flags.strategy !== "pr")
   ) {
     fail(
       "Usage: aidlc-unit land <unit> [--step git|state|audit|all] [--target <branch>] " +
-        "[--strategy merge] [--accept-released-attempt --user-input <human acknowledgment>]",
+        "[--strategy merge|pr] [--refold] [--accept-released-attempt --user-input <human acknowledgment>]",
     );
   }
   const pd = resolveProjectDir(projectDir);
-  assertMainCheckout(pd);
+  const refold = flags.refold === "true";
   const existing = readUnitMergeTransaction(pd, unit);
   if (!existing || !["approved", "git-landed", "state-folded", "complete"].includes(existing.status)) {
     fail(`Unit "${unit}" merge is not approved.`);
@@ -3428,9 +3827,13 @@ function landUnit(args: string[], projectDir?: string): void {
   if (gate?.decision !== "approve") {
     fail(`Unit "${unit}" has no current approved merge-gate receipt.`);
   }
-  if (gate.strategy !== "merge" || !gate.target) {
+  if ((gate.strategy !== "merge" && gate.strategy !== "pr") || !gate.target) {
     fail(`Unit "${unit}" approved merge gate has invalid strategy or target evidence.`);
   }
+  if (flags.strategy !== undefined && flags.strategy !== gate.strategy) {
+    fail(`Unit "${unit}" merge gate approved strategy "${gate.strategy}", not "${flags.strategy}".`);
+  }
+  const strategy: "merge" | "pr" = gate.strategy;
   const target =
     flags.target ?? gate.target;
   if (
@@ -3443,8 +3846,27 @@ function landUnit(args: string[], projectDir?: string): void {
   transaction = {
     ...transaction,
     target_branch: gate.target,
-    strategy: "merge",
+    strategy,
   };
+  // A local merge lands on the target branch of the main checkout; a
+  // pull-request landing folds on the Unit's own branch, in whichever checkout
+  // or worktree built it.
+  if (strategy === "merge") assertMainCheckout(pd);
+  if (refold) {
+    // After a rebase of the open pull request: the fold is redone on the
+    // rebased branch. Accepted for a completed landing, and for one whose
+    // earlier refold was interrupted (its landing commit is no longer here).
+    if (strategy !== "pr" || !["git-landed", "state-folded", "complete"].includes(transaction.status)) {
+      fail(`Unit "${unit}" --refold re-runs the fold of a pull-request landing after a rebase.`);
+    }
+    const branch = currentBranch(pd);
+    if (branch !== target) {
+      fail(`Unit "${unit}" --refold expected branch "${target}", found "${branch || "(detached)"}".`);
+    }
+    const head = gitOutput(pd, ["rev-parse", "HEAD"], "Cannot resolve the rebased branch head");
+    transaction = { ...transaction, status: "git-landed", git_commit_oid: head };
+    writeUnitMergeTransaction(pd, transaction);
+  }
   if (transaction.evidence.merge_held) {
     fail(
       `Unit "${unit}" merge is held. Resolve the existing HOLD-MERGE flow in the team checkout, publish, and re-pin.`,
@@ -3478,7 +3900,7 @@ function landUnit(args: string[], projectDir?: string): void {
     );
     // A stray file in the landing checkout's audit directory would move the
     // run floor the evidence is read against; name it as what it is first.
-    assertCleanSourceWorktree(pd);
+    if (strategy === "merge") assertCleanSourceWorktree(pd);
     if (
       !git(
         pd,
@@ -3503,7 +3925,9 @@ function landUnit(args: string[], projectDir?: string): void {
           `run aidlc unit pin ${unit} again and obtain a new merge gate.`,
       );
     }
-    transaction = landGit(pd, transaction, target);
+    transaction = strategy === "pr"
+      ? landPr(pd, transaction, target, landingHead)
+      : landGit(pd, transaction, target);
     writeUnitMergeTransaction(pd, transaction);
   }
   if (
@@ -3513,12 +3937,18 @@ function landUnit(args: string[], projectDir?: string): void {
     if (!transaction.git_commit_oid) {
       fail(`Unit "${unit}" has no validated git landing commit.`);
     }
-    validateLandedMerge(
+    (strategy === "pr" ? validateLandedPr : validateLandedMerge)(
       pd,
       transaction,
       transaction.git_commit_oid,
       target,
     );
+    // A pull-request landing folds on the Unit's own branch, whose state file
+    // holds the Unit's walk (its Current Stage, stage markers, revision count).
+    // That state is main's to own, as a merge landing keeps it: the fold is made
+    // on main's copy, so the workspace pull request carries the fold and nothing
+    // else of the branch's state.
+    if (strategy === "pr") restoreIntegrationState(pd);
     const liveState = readStateFile(pd);
     const liveScope = getField(liveState, "Scope") ?? "";
     const liveStageColumns = unitMajorConstructionStageSlugs(
@@ -3570,7 +4000,13 @@ function landUnit(args: string[], projectDir?: string): void {
       pd,
       `Finalize Unit ${unit} merge metadata`,
     );
-    transaction = { ...transaction, status: "complete" };
+    transaction = {
+      ...transaction,
+      status: "complete",
+      ...(strategy === "pr"
+        ? { landed_head_oid: gitOutput(pd, ["rev-parse", "HEAD"], "Cannot resolve the landed head") }
+        : {}),
+    };
     writeUnitMergeTransaction(pd, transaction);
   }
   console.log(JSON.stringify({
@@ -3786,6 +4222,14 @@ function claimUnit(args: string[], projectDir?: string): void {
   const existingStamp = readUnitScopeStamp(pd);
   if (existingStamp) {
     if (existingStamp.unit !== unit) {
+      const live = fetchIntegration(pd);
+      if (openingStatus(pd, live.oid).completed.has(existingStamp.unit)) {
+        const where = live.remote ? `${live.remote}/${live.branch}` : live.branch;
+        fail(
+          `Unit "${existingStamp.unit}" is merged on ${where}; run \`aidlc unit finish ${existingStamp.unit}\` ` +
+            `to close this checkout's scope, then claim "${unit}".`,
+        );
+      }
       fail(`This checkout is already scoped to Unit "${existingStamp.unit}".`);
     }
     const recovered = currentClaim(
@@ -3912,7 +4356,6 @@ function releaseUnit(args: string[], projectDir?: string): void {
   if (readApplicableTeamUnitScopeStamp(pd)) {
     fail("release must run from an unscoped checkout.");
   }
-  assertMainCheckout(pd);
   const state = readStateFile(pd);
   if (!isTeamUnitOwnership(state)) fail("Unit release requires Unit Ownership: team.");
   const identity = activeIdentity(pd);
@@ -4088,6 +4531,569 @@ function participate(projectDir?: string): void {
   console.log(JSON.stringify({ participant: true }));
 }
 
+// --- Pull requests a Unit opens under strategy pr ----------------------------
+//
+// Code pull requests are opened before pin creates the merge journal, so their
+// references live in a sibling file of the journal: gate reads the code ones,
+// finish reads the workspace one.
+type UnitPullRequestRecord = {
+  ref: string;
+  url: string;
+  repo: string;
+  branch: string;
+  head: string;
+  opened_at: string;
+};
+
+type UnitPullRequests = {
+  version: 1;
+  space: string;
+  intent_uuid: string;
+  unit: string;
+  code: UnitPullRequestRecord[];
+  workspace?: UnitPullRequestRecord;
+  follow_up?: UnitPullRequestRecord;
+};
+
+type OpenedPullRequest = UnitPullRequestRecord & { title: string };
+
+const WORKSPACE_REPO = ".";
+
+const PULL_REQUEST_TEMPLATE_PATHS = [
+  ".github/PULL_REQUEST_TEMPLATE.md",
+  ".github/pull_request_template.md",
+  "PULL_REQUEST_TEMPLATE.md",
+  "pull_request_template.md",
+  "docs/PULL_REQUEST_TEMPLATE.md",
+  "docs/pull_request_template.md",
+];
+
+// True once the Unit's checkout opened a pull request through `unit pr`: the
+// one durable sign that this Unit lands through pull requests (strategy `pr`),
+// which `next` reads to name the right closing path.
+export function unitLandsThroughPullRequests(projectDir: string, unit: string): boolean {
+  return existsSync(unitPullRequestsPath(projectDir, unit));
+}
+
+function unitPullRequestsPath(projectDir: string, unit: string): string {
+  // A subdirectory of the journal's, so the journal listing never reads it.
+  return join(dirname(unitMergeTransactionPath(projectDir, unit)), "pull-requests", `${unit}.json`);
+}
+
+function readUnitPullRequests(projectDir: string, unit: string): UnitPullRequests | null {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(unitPullRequestsPath(projectDir, unit), "utf-8"),
+    ) as UnitPullRequests;
+    const identity = activeIdentity(projectDir);
+    if (
+      parsed.version !== 1 ||
+      parsed.unit !== unit ||
+      parsed.space !== identity.space ||
+      parsed.intent_uuid !== identity.intentUuid
+    ) {
+      return null;
+    }
+    return { ...parsed, code: Array.isArray(parsed.code) ? parsed.code : [] };
+  } catch {
+    return null;
+  }
+}
+
+function writeUnitPullRequests(projectDir: string, record: UnitPullRequests): void {
+  const path = unitPullRequestsPath(projectDir, record.unit);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`);
+}
+
+function emptyUnitPullRequests(projectDir: string, unit: string): UnitPullRequests {
+  const identity = activeIdentity(projectDir);
+  return { version: 1, space: identity.space, intent_uuid: identity.intentUuid, unit, code: [] };
+}
+
+function withoutTitle(opened: OpenedPullRequest): UnitPullRequestRecord {
+  const { title: _title, ...record } = opened;
+  return record;
+}
+
+// A Unit named after its ticket (`DEMO-42-alpha`) carries the key once, as
+// the pull request title's prefix; a Unit without one gets no prefix.
+function ticketKey(unit: string): string | null {
+  const match = /^([A-Za-z][A-Za-z0-9]*-\d+)(?:-|$)/.exec(unit);
+  return match ? match[1].toUpperCase() : null;
+}
+
+// The Unit's title: the name or title cell of its row in the Units plan table,
+// without the ticket key; failing that, the directory name read as words.
+function unitTitle(projectDir: string, unit: string, key: string | null): string {
+  const strip = (text: string): string => {
+    let out = text.replace(/`/g, "").trim();
+    if (key) {
+      out = out
+        .replace(new RegExp(`^\\[?${key}\\]?\\s*[:\\-–—]?\\s*`, "i"), "")
+        .replace(new RegExp(`^${key}-`, "i"), "");
+    }
+    return out.trim();
+  };
+  const fallback = strip(unit).replace(/[-_]+/g, " ").trim() || unit;
+  const recordPrefix = relativeRecordDir(projectDir);
+  if (!recordPrefix) return fallback;
+  const plan = join(projectDir, recordPrefix, "inception", "units-generation", "unit-of-work.md");
+  if (!existsSync(plan)) return fallback;
+  let headers: string[] = [];
+  for (const line of readFileSync(plan, "utf-8").split(/\r?\n/)) {
+    if (!line.trim().startsWith("|")) {
+      headers = [];
+      continue;
+    }
+    const cells = line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+    if (headers.length === 0) {
+      headers = cells.map((cell) => cell.toLowerCase());
+      continue;
+    }
+    if (cells.every((cell) => /^:?-{2,}:?$/.test(cell))) continue;
+    if (!cells.some((cell) => cell.replace(/`/g, "").trim() === unit)) continue;
+    const column = headers.findIndex((header) => /^(unit\s*)?(name|title)$/.test(header) || header === "unit");
+    const candidate = column >= 0 ? strip(cells[column] ?? "") : "";
+    return candidate && candidate.toLowerCase() !== unit.toLowerCase() ? candidate : fallback;
+  }
+  return fallback;
+}
+
+function pullRequestTemplate(repoCheckout: string): string {
+  for (const relative of PULL_REQUEST_TEMPLATE_PATHS) {
+    const path = join(repoCheckout, relative);
+    if (existsSync(path)) return readFileSync(path, "utf-8");
+  }
+  fail(
+    `${repoCheckout} has no pull request template (${PULL_REQUEST_TEMPLATE_PATHS[0]}); ` +
+      "a Unit's pull requests are written from the repository's own template.",
+  );
+}
+
+// The repository's template, its ticket line filled, with what the engine knows
+// appended; every other heading stays for the person.
+function pullRequestBody(template: string, key: string | null, lines: string[]): string {
+  let body = template.replace(/\r\n/g, "\n");
+  if (key) {
+    body = /^Ticket:[^\n]*$/m.test(body)
+      ? body.replace(/^Ticket:[^\n]*$/m, `Ticket: ${key}`)
+      : `Ticket: ${key}\n\n${body}`;
+  }
+  return `${body.replace(/\s+$/, "")}\n\n## AI-DLC Unit\n\n${lines.map((line) => `- ${line}`).join("\n")}\n`;
+}
+
+// Opens a pull request for the current branch of `repoCheckout` through `gh`;
+// the branch must already be pushed, and `gh` prints the new URL.
+function createPullRequest(
+  repoCheckout: string,
+  repoLabel: string,
+  title: string,
+  body: string,
+  draft: boolean,
+): OpenedPullRequest {
+  const integration = fetchIntegration(repoCheckout);
+  if (!integration.remote) fail(`${repoCheckout} has no remote to open a pull request on.`);
+  const branch = git(repoCheckout, ["branch", "--show-current"]).stdout.trim();
+  if (!branch || branch === integration.branch) {
+    fail(`${repoCheckout} is on "${branch || "(detached)"}"; switch to the branch the pull request is for.`);
+  }
+  const head = gitOutput(repoCheckout, ["rev-parse", "HEAD"], `Cannot resolve HEAD in ${repoCheckout}`);
+  const remoteHead = git(repoCheckout, ["ls-remote", "--heads", integration.remote, branch]).stdout.split(/\s+/)[0] ?? "";
+  if (remoteHead !== head) {
+    fail(`Branch "${branch}" of ${repoCheckout} is not pushed to ${integration.remote} at ${head}; push it first.`);
+  }
+  const bodyFile = join(tmpdir(), `aidlc-pr-${process.pid}-${Date.now()}.md`);
+  writeFileSync(bodyFile, body, "utf-8");
+  let created: SpawnSyncReturns<string>;
+  try {
+    created = spawnSync(
+      ghBinary(),
+      [
+        "pr",
+        "create",
+        "--title",
+        title,
+        "--body-file",
+        bodyFile,
+        "--head",
+        branch,
+        "--base",
+        integration.branch,
+        ...(draft ? ["--draft"] : []),
+      ],
+      { cwd: repoCheckout, encoding: "utf-8", env: { ...process.env }, timeout: 60_000 },
+    );
+  } finally {
+    try {
+      unlinkSync(bodyFile);
+    } catch {
+      // Already gone.
+    }
+  }
+  if (created.status !== 0) {
+    fail(`gh pr create failed in ${repoCheckout}: ${(created.stderr ?? "").trim() || `exit ${created.status}`}.`);
+  }
+  const url = (created.stdout ?? "").split(/\s+/).reverse().find((token) => /\/pull\/\d+$/.test(token));
+  const parsed = url ? parsePullRequestRef(url) : null;
+  if (!url || !parsed) {
+    fail(`gh pr create in ${repoCheckout} returned no pull request URL: ${(created.stdout ?? "").trim()}`);
+  }
+  return {
+    ref: `${parsed.owner}/${parsed.repo}#${parsed.number}`,
+    url,
+    repo: repoLabel,
+    branch,
+    head,
+    opened_at: isoTimestamp(),
+    title,
+  };
+}
+
+// `aidlc unit pr <unit>`: the workspace pull request after land, or with
+// `--repo <name>` a code repository's pull request before gate. The title is
+// `[<ticket>] <Unit title>`, the body the repository's own template.
+function openPullRequest(args: string[], projectDir?: string): void {
+  const { positional, flags } = parseArgs(args);
+  const unit = positional[0];
+  if (!unit) fail("Usage: aidlc-unit pr <unit> [--repo <name>] [--draft]");
+  const unitError = validateUnitName(unit);
+  if (unitError) fail(unitError);
+  const pd = resolveProjectDir(projectDir);
+  const stamp = readApplicableTeamUnitScopeStamp(pd);
+  if (!stamp || stamp.unit !== unit) {
+    fail(`This checkout is not scoped to Unit "${unit}"; its pull requests are opened from the checkout that builds it.`);
+  }
+  const draft = flags.draft === "true";
+  const repo = flags.repo;
+  const transaction = readUnitMergeTransaction(pd, unit);
+  const recorded = readUnitPullRequests(pd, unit) ?? emptyUnitPullRequests(pd, unit);
+  const recordPrefix = relativeRecordDir(pd) ?? "";
+  const key = ticketKey(unit);
+  const title = `${key ? `[${key}] ` : ""}${unitTitle(pd, unit, key)}`;
+  if (repo !== undefined) {
+    if (!intentRepos(pd).includes(repo)) fail(`--repo "${repo}" is not a repository this intent records.`);
+    const checkout = repoDir(pd, repo);
+    if (!existsSync(join(checkout, ".git"))) fail(`Code repository "${repo}" is not checked out at ${checkout}.`);
+    if (transaction && ["approved", "git-landed", "state-folded", "complete", "finished"].includes(transaction.status)) {
+      fail(`Unit "${unit}" merge gate already recorded its code pull requests; a later code change is a follow-up of its own.`);
+    }
+    const branch = git(checkout, ["branch", "--show-current"]).stdout.trim();
+    const existing = recorded.code.find((entry) => entry.repo === repo && entry.branch === branch);
+    if (existing) {
+      console.log(JSON.stringify({ opened: true, recovered: true, unit, ...existing }));
+      return;
+    }
+    const body = pullRequestBody(pullRequestTemplate(checkout), key, [
+      `Unit \`${unit}\` of \`${basename(recordPrefix)}\`, code in \`${repo}\`.`,
+      "The Unit's record follows in the workspace pull request once this one is merged.",
+    ]);
+    const opened = createPullRequest(checkout, repo, title, body, draft);
+    writeUnitPullRequests(pd, { ...recorded, code: [...recorded.code, withoutTitle(opened)] });
+    console.log(JSON.stringify({ opened: true, unit, ...opened }));
+    return;
+  }
+  if (recorded.workspace) {
+    console.log(JSON.stringify({ opened: true, recovered: true, unit, ...recorded.workspace }));
+    return;
+  }
+  if (!transaction || !["complete", "finished"].includes(transaction.status)) {
+    fail(`Unit "${unit}" has not landed in this checkout; run aidlc unit land ${unit} before opening the workspace pull request.`);
+  }
+  const body = pullRequestBody(pullRequestTemplate(pd), key, [
+    `Unit \`${unit}\` of \`${basename(recordPrefix)}\`: its record under \`${recordPrefix}/construction/${unit}/\`, this checkout's audit shard, and the Unit's merged row.`,
+    `Code pull requests: ${recorded.code.map((entry) => entry.url).join(", ") || "none"}.`,
+    `Once this merges, \`aidlc unit finish ${unit}\` closes the checkout that built it.`,
+  ]);
+  const opened = createPullRequest(pd, WORKSPACE_REPO, title, body, draft);
+  writeUnitPullRequests(pd, { ...recorded, workspace: withoutTitle(opened) });
+  console.log(JSON.stringify({ opened: true, unit, ...opened }));
+}
+
+function mainCheckoutInfo(dir: string): { isMain: boolean; top: string; mainDir: string } {
+  const top = git(dir, ["rev-parse", "--show-toplevel"]);
+  const common = git(dir, ["rev-parse", "--git-common-dir"]);
+  if (!top.ok || !common.ok) fail(`Cannot resolve the git checkout at ${dir}.`);
+  const topReal = realpathSync(top.stdout.trim());
+  const mainDir = realpathSync(dirname(resolve(topReal, common.stdout.trim())));
+  return { isMain: topReal === mainDir, top: topReal, mainDir };
+}
+
+function shellWord(text: string): string {
+  return /^[A-Za-z0-9_@%+=:,./~-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+function ensureCommitPresent(dir: string, oid: string, remote: string | null, what: string): void {
+  const present = (): boolean => git(dir, ["cat-file", "-e", `${oid}^{commit}`]).ok;
+  if (present()) return;
+  if (remote) git(dir, ["fetch", "--quiet", remote, oid]);
+  if (present()) return;
+  if (remote) git(dir, ["fetch", "--all", "--quiet"]);
+  if (!present()) fail(`${what} ${oid} is not available in ${dir}; fetch it first.`);
+}
+
+function validateDriftAcknowledgment(unit: string, userInput: string | undefined): string {
+  const answer = userInput?.trim();
+  if (!answer) {
+    fail(`Unit "${unit}" --accept-merged-drift requires --user-input <what was inspected and accepted>.`);
+  }
+  if (!humanPresenceGuardDisabled() && isNonAnswer(answer)) {
+    fail(`Refusing Unit "${unit}" merge drift acceptance: --user-input "${answer}" is cancellation boilerplate.`);
+  }
+  const authorship = humanPresenceGuardDisabled()
+    ? null
+    : selfAttributedDecisionMarker(answer, "approval");
+  if (authorship) {
+    fail(
+      `Refusing Unit "${unit}" merge drift acceptance: decision self-attribution blocked ` +
+        `(${authorship.category}) in --user-input: "${authorship.phrase}".`,
+    );
+  }
+  return answer;
+}
+
+// `aidlc unit finish <unit>`: the Unit's pull request is merged and main
+// carries exactly what land left behind; then this checkout's scope ends. A
+// main checkout returns to the integration branch, a worktree is handed the
+// one command that removes it.
+function finishUnit(args: string[], projectDir?: string): void {
+  const { positional, flags } = parseArgs(args);
+  const unit = positional[0];
+  if (!unit) {
+    fail(
+      "Usage: aidlc-unit finish <unit> [--pr <owner>/<repo>#<n>] " +
+        "[--accept-merged-drift --user-input <human acknowledgment>]",
+    );
+  }
+  const unitError = validateUnitName(unit);
+  if (unitError) fail(unitError);
+  const pd = resolveProjectDir(projectDir);
+  const identity = activeIdentity(pd);
+  const stamp = readUnitScopeStamp(pd);
+  if (stamp && (stamp.unit !== unit || stamp.intent_uuid !== identity.intentUuid)) {
+    fail(`This checkout is scoped to Unit "${stamp.unit}", not "${unit}".`);
+  }
+  const integration = fetchIntegration(pd);
+  const existing = readUnitMergeTransaction(pd, unit);
+  if (!existing || !["complete", "finished"].includes(existing.status)) {
+    // Not landed from here. The scope still ends when the Unit is complete on
+    // the integration ref (another checkout landed it) or this checkout's
+    // claim was released or superseded; nothing is verified in that case.
+    if (!stamp) {
+      fail(`This checkout is not scoped to Unit "${unit}" and did not land it; nothing to finish.`);
+    }
+    const completed = openingStatus(pd, integration.oid).completed.has(unit);
+    const live = currentClaim(pd, integration.remote, stamp.claim_ref);
+    const superseded =
+      live?.status !== "claimed" ||
+      live.generation !== stamp.generation ||
+      live.nonce !== stamp.nonce;
+    if (!completed && !superseded) {
+      fail(
+        `Unit "${unit}" has not landed in this checkout; finish runs after aidlc unit land ${unit} ` +
+          "and the merge of its pull request.",
+      );
+    }
+    closeCheckoutScope(pd, git(pd, ["branch", "--show-current"]).stdout.trim(), {
+      finished: true,
+      unit,
+      verified: false,
+      reason: completed
+        ? `Unit "${unit}" is complete on ${integration.ref}, landed from another checkout.`
+        : `This checkout's claim of Unit "${unit}" was released or superseded.`,
+    });
+    return;
+  }
+  assertTransactionIdentity(pd, existing);
+  let transaction = existing;
+  const recorded = readUnitPullRequests(pd, unit);
+  const ref = flags.pr ?? recorded?.workspace?.ref;
+  if (!ref) {
+    fail(
+      `Unit "${unit}" has no workspace pull request on record; open it with aidlc unit pr ${unit}, ` +
+        "or name it with --pr <owner>/<repo>#<n>.",
+    );
+  }
+  const view = viewPullRequest(ref);
+  if (view.state !== "MERGED" || !view.mergeCommit) {
+    fail(`Pull request ${ref} is not merged (state ${view.state ?? "unknown"}).`);
+  }
+  const mergeCommit = view.mergeCommit;
+  ensureCommitPresent(pd, mergeCommit, integration.remote, `Merge commit of ${ref}`);
+  if (!git(pd, ["merge-base", "--is-ancestor", mergeCommit, integration.oid]).ok) {
+    fail(`Merge commit ${mergeCommit} of ${ref} is not on ${integration.ref} at ${integration.oid}.`);
+  }
+  const landedHead = transaction.landed_head_oid ?? recorded?.workspace?.head ?? transaction.git_commit_oid;
+  if (!landedHead) fail(`Unit "${unit}" journal records no landed head to compare with ${ref}.`);
+  ensureCommitPresent(pd, landedHead, integration.remote, "Landed head");
+  const base = gitOutput(
+    pd,
+    ["merge-base", landedHead, mergeCommit],
+    `Cannot find the merge base of ${landedHead} and ${mergeCommit}`,
+  );
+  const drift = [...new Set([
+    ...contentNotOnTip(pd, base, landedHead, mergeCommit),
+    ...contentNotOnTip(pd, base, mergeCommit, landedHead),
+  ])].sort();
+  const accept = flags["accept-merged-drift"] === "true";
+  if (drift.length > 0 && transaction.status !== "finished" && !accept) {
+    fail(
+      `Pull request ${ref} merged content that was not landed, at: ${drift.join(", ")}. ` +
+        `Inspect it (git diff ${landedHead} ${mergeCommit} -- <path>); to accept it, run ` +
+        `aidlc unit finish ${unit} --accept-merged-drift --user-input "<what you inspected and accept>".`,
+    );
+  }
+  const unitBranch = git(pd, ["branch", "--show-current"]).stdout.trim();
+  let followUp = recorded?.follow_up ?? null;
+  if (drift.length > 0 && transaction.status !== "finished") {
+    const userInput = validateDriftAcknowledgment(unit, flags["user-input"]);
+    if (!integration.remote) fail("The drift acknowledgment needs a remote for its follow-up pull request.");
+    if (git(pd, ["status", "--porcelain", "--untracked-files=no"]).stdout.trim()) {
+      fail(`Unit "${unit}" drift acknowledgment needs a clean tracked tree for its follow-up pull request; commit first.`);
+    }
+    const key = ticketKey(unit);
+    const branch = key ? `${key}/${unit.slice(key.length + 1) || unit}-merge-drift` : `${unit}-merge-drift`;
+    const switched = git(pd, ["switch", "-c", branch, integration.oid]);
+    if (!switched.ok) fail(`Cannot create branch "${branch}" from ${integration.ref}: ${switched.stderr.trim()}`);
+    appendAuditEntry(
+      "UNIT_MERGE_DRIFT_ACCEPTED",
+      {
+        Unit: unit,
+        "Pull request": view.url,
+        "Merge commit OID": mergeCommit,
+        "Landed head OID": landedHead,
+        Paths: drift.join(", "),
+        "User Input": userInput,
+      },
+      pd,
+    );
+    const recordPrefix = relativeRecordDir(pd) ?? "";
+    const shard = stamp?.audit_shard ?? transaction.audit_shard;
+    const shardPath = shard ? `${recordPrefix}/audit/${shard}` : `${recordPrefix}/audit`;
+    git(pd, ["add", "--", shardPath]);
+    const committed = git(pd, ["commit", "-m", `Acknowledge Unit ${unit} merge drift`, "--", shardPath]);
+    if (!committed.ok) fail(`Cannot commit the drift acknowledgment: ${committed.stderr.trim()}`);
+    const pushed = git(pd, ["push", "-u", integration.remote, branch]);
+    if (!pushed.ok) fail(`Cannot push "${branch}": ${pushed.stderr.trim()}`);
+    const body = pullRequestBody(pullRequestTemplate(pd), key, [
+      `Unit \`${unit}\`: a person inspected and accepted content merged by ${view.url} that differs ` +
+        `from the landed head at ${drift.map((path) => `\`${path}\``).join(", ")}.`,
+      "Record-only: this pull request carries the audit row and nothing else.",
+    ]);
+    const opened = createPullRequest(
+      pd,
+      WORKSPACE_REPO,
+      `${key ? `[${key}] ` : ""}${unitTitle(pd, unit, key)}: merge drift acknowledgment`,
+      body,
+      false,
+    );
+    followUp = withoutTitle(opened);
+    writeUnitPullRequests(pd, { ...(recorded ?? emptyUnitPullRequests(pd, unit)), follow_up: followUp });
+  }
+  if (transaction.status !== "finished") {
+    transaction = {
+      ...transaction,
+      status: "finished",
+      finished_at: isoTimestamp(),
+      merge_commit_oid: mergeCommit,
+      ...(drift.length > 0 ? { merge_drift: drift } : {}),
+    };
+    writeUnitMergeTransaction(pd, transaction);
+  }
+  // The claim ref has nothing left to do once main carries the Unit: the
+  // merged pull request, the audit rows and the journal are the record, and a
+  // stale checkout still fails closed, with no live claim to publish or pin
+  // against. Deleting it keeps the branch list to the work in flight.
+  let claimRefDeleted = false;
+  let claimRefNote: string | null = null;
+  if (integration.remote) {
+    const claimRefName = transaction.claim_ref;
+    if (refTip(pd, integration.remote, claimRefName) === null) {
+      claimRefDeleted = true;
+    } else {
+      const deleted = git(pd, ["push", integration.remote, "--delete", claimRefName]);
+      claimRefDeleted = deleted.ok;
+      if (!deleted.ok) {
+        claimRefNote = `${claimRefName} was not deleted from ${integration.remote}: ${deleted.stderr.trim()}`;
+      }
+    }
+    invalidateLiveClaimPayloadCache(pd, unit);
+  }
+  closeCheckoutScope(pd, unitBranch, {
+    finished: true,
+    unit,
+    verified: true,
+    pull_request: view.url,
+    merge_commit: mergeCommit,
+    drift,
+    follow_up: followUp?.url ?? null,
+    claim_ref_deleted: claimRefDeleted,
+    ...(claimRefNote ? { claim_ref_note: claimRefNote } : {}),
+  });
+}
+
+// The end of a checkout's Unit scope, however the Unit got to main. A main
+// checkout returns to the integration branch, in the workspace and every
+// recorded code repository; a worktree cannot delete the branches it has
+// checked out, so it is handed one command that removes it, child
+// repositories first.
+function closeCheckoutScope(
+  pd: string,
+  unitBranch: string,
+  result: Record<string, unknown>,
+): void {
+  clearUnitScopeStamp(pd);
+  const checkout = mainCheckoutInfo(pd);
+  const repos = intentRepos(pd).filter((repo) => existsSync(join(repoDir(pd, repo), ".git")));
+  if (checkout.isMain) {
+    const updated: string[] = [];
+    const notes: string[] = [];
+    const settle = (dir: string, label: string): void => {
+      if (git(dir, ["status", "--porcelain", "--untracked-files=no"]).stdout.trim()) {
+        notes.push(`${label} has uncommitted changes; left as is.`);
+        return;
+      }
+      const target = fetchIntegration(dir);
+      if (git(dir, ["branch", "--show-current"]).stdout.trim() !== target.branch) {
+        const switched = git(dir, ["switch", target.branch]);
+        if (!switched.ok) {
+          notes.push(`${label}: cannot switch to ${target.branch}: ${switched.stderr.trim()}`);
+          return;
+        }
+      }
+      const forwarded = git(dir, ["merge", "--ff-only", target.ref]);
+      if (!forwarded.ok) {
+        notes.push(`${label}: ${target.branch} does not fast-forward to ${target.ref}: ${forwarded.stderr.trim()}`);
+        return;
+      }
+      updated.push(`${label} on ${target.branch} at ${gitOutput(dir, ["rev-parse", "--short", "HEAD"], "Cannot resolve HEAD")}`);
+    };
+    settle(pd, "workspace");
+    for (const repo of repos) settle(repoDir(pd, repo), repo);
+    console.log(JSON.stringify({
+      ...result,
+      checkout: "main",
+      updated,
+      notes,
+      next_step: "Run `next` to pick the next Unit.",
+    }));
+    return;
+  }
+  const parts: string[] = [];
+  for (const repo of repos) {
+    const dir = repoDir(pd, repo);
+    const info = mainCheckoutInfo(dir);
+    if (info.isMain) continue; // a clone inside the worktree goes with it
+    const branch = git(dir, ["branch", "--show-current"]).stdout.trim();
+    parts.push(`git -C ${shellWord(info.mainDir)} worktree remove --force ${shellWord(info.top)}`);
+    if (branch) parts.push(`git -C ${shellWord(info.mainDir)} branch -D ${shellWord(branch)}`);
+  }
+  const branches = [...new Set([unitBranch, git(pd, ["branch", "--show-current"]).stdout.trim()].filter(Boolean))];
+  parts.push(`git -C ${shellWord(checkout.mainDir)} worktree remove --force ${shellWord(checkout.top)}`);
+  for (const branch of branches) parts.push(`git -C ${shellWord(checkout.mainDir)} branch -D ${shellWord(branch)}`);
+  console.log(JSON.stringify({ ...result, checkout: "worktree", cleanup_command: parts.join(" && ") }));
+}
+
 let projectDir: string | undefined;
 
 export function main(argv: string[]): void {
@@ -4107,6 +5113,8 @@ export function main(argv: string[]): void {
     else if (command === "pin") pinUnit(args, projectDir);
     else if (command === "gate") gateUnitMerge(args, projectDir);
     else if (command === "land") landUnit(args, projectDir);
+    else if (command === "pr") openPullRequest(args, projectDir);
+    else if (command === "finish") finishUnit(args, projectDir);
     else if (command === "merge-status") {
       const unit = args[0];
       if (!unit) fail("Usage: aidlc-unit merge-status <unit>");
@@ -4120,7 +5128,7 @@ export function main(argv: string[]): void {
       console.log(JSON.stringify(unitClaimOverview(resolveProjectDir(projectDir)), null, 2));
     } else {
       fail(
-        "Usage: aidlc-unit <adopt|claim|release|participate|publish|pin|gate|land|merge-status|status> ...",
+        "Usage: aidlc-unit <adopt|claim|release|participate|publish|pin|gate|land|pr|finish|merge-status|status> ...",
       );
     }
   } catch (error) {
