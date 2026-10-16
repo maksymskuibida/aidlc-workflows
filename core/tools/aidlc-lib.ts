@@ -3263,9 +3263,35 @@ export function activeSpace(projectDir: string): string {
   try {
     return knownActiveSpace(workspaceRoot(projectDir), readFileSync(ptr, "utf-8"));
   } catch {
-    // no cursor → default
+    // no cursor → the main checkout's, for a git worktree; else default
+  }
+  const main = mainCheckoutOfWorktree(projectDir);
+  if (main !== null) {
+    try {
+      return knownActiveSpace(
+        workspaceRoot(projectDir),
+        readFileSync(join(workspaceRoot(main), ACTIVE_SPACE_POINTER), "utf-8"),
+      );
+    } catch {
+      // the main checkout has no cursor either
+    }
   }
   return DEFAULT_SPACE;
+}
+
+// The main checkout of a linked git worktree (`git worktree add`, a host's
+// per-session worktree), or null for a main checkout, a separate clone, or no
+// git. A worktree starts without the git-ignored per-user cursors, and until
+// its own first switch it reads the ones its main checkout holds on this
+// machine, so it finds the project's space and intent as the main checkout
+// does. Git's own metadata files only: no git process on this hot path.
+function mainCheckoutOfWorktree(projectDir: string): string | null {
+  const gitDir = gitMetadataDirectory(projectDir);
+  if (gitDir === null) return null;
+  const common = gitCommonDirectory(gitDir);
+  if (common === null || common === gitDir || basename(common) !== ".git") return null;
+  const main = dirname(common);
+  return canonicalPathKey(main) === canonicalPathKey(projectDir) ? null : main;
 }
 
 // `aidlc/spaces/<space>/intents` — the intent registry + record root.
@@ -3384,13 +3410,23 @@ export function listIntentDirs(projectDir: string, space?: string): string[] {
 // only by intent create and switch on this machine, so unlike a lone committed
 // record it is local evidence of a choice.
 export function readActiveIntentCursor(projectDir: string, space?: string): string | null {
-  const dir = intentsDir(projectDir, space ?? activeSpace(projectDir));
+  const sp = space ?? activeSpace(projectDir);
+  const dir = intentsDir(projectDir, sp);
+  let raw: string;
   try {
-    const raw = readFileSync(join(dir, ACTIVE_INTENT_POINTER), "utf-8").trim();
-    if (raw.length > 0 && existsSync(join(dir, raw, "aidlc-state.md"))) return raw;
+    raw = readFileSync(join(dir, ACTIVE_INTENT_POINTER), "utf-8").trim();
   } catch {
-    // no cursor
+    // No cursor: a git worktree reads its main checkout's (activeSpace).
+    const main = mainCheckoutOfWorktree(projectDir);
+    if (main === null) return null;
+    try {
+      raw = readFileSync(join(intentsDir(main, sp), ACTIVE_INTENT_POINTER), "utf-8").trim();
+    } catch {
+      return null;
+    }
+    if (!INTENT_SELECTOR_REGEX.test(raw)) return null;
   }
+  if (raw.length > 0 && existsSync(join(dir, raw, "aidlc-state.md"))) return raw;
   return null;
 }
 
@@ -4643,6 +4679,19 @@ export function listSpaces(projectDir: string, activeOverride?: string): SpaceIn
     // no spaces dir → just the always-present default
   }
   return [...names].sort().map((name) => ({ name, active: name === active }));
+}
+
+// The one line that says where this project's work is when the active space
+// has none and exactly one other space does (a checkout whose cursor names an
+// empty space), with the switch that selects it; "" otherwise.
+export function otherSpaceWithWorkLine(projectDir: string, space: string): string {
+  if (listIntentDirs(projectDir, space).length > 0) return "";
+  const holding = listSpaces(projectDir, space)
+    .map((entry) => entry.name)
+    .filter((name) => name !== space && listIntentDirs(projectDir, name).length > 0);
+  return holding.length === 1
+    ? ` This project's work is in space "${holding[0]}": select it with \`${aidlcInvocation()} engine space switch ${holding[0]}\`.`
+    : "";
 }
 
 export interface IntentInfo {

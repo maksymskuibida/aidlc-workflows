@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { DEFAULT_SUBPROCESS_TIMEOUT_MS } from "./aidlc-runtime-budget.ts";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -862,7 +863,10 @@ export function resolvePinnedDispatch(
       remediation,
     };
   }
-  if (registry.pins[project] !== version) {
+  if (
+    registry.pins[project] !== version &&
+    !(registry.pins[project] === undefined && inheritWorktreePin(projectDir, version, registry.pins))
+  ) {
     return {
       kind: "failure",
       code: EXIT.failure,
@@ -2617,6 +2621,46 @@ export async function installPinnedRelease(options: {
     }
   } finally {
     releaseReservation?.();
+  }
+}
+
+function gitCommonDir(dir: string): string | null {
+  const result = spawnSync("git", ["rev-parse", "--git-common-dir"], {
+    cwd: dir,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: DEFAULT_SUBPROCESS_TIMEOUT_MS,
+  });
+  const out = (result.stdout ?? "").trim();
+  if (result.status !== 0 || !out) return null;
+  try {
+    return realpathSync(resolve(dir, out));
+  } catch {
+    return null;
+  }
+}
+
+// A git worktree of a checkout registered for this same version is that
+// project: the person pinned it once, and every worktree a host makes of it
+// (Claude Code's desktop app makes one per session) inherits the registration
+// on first use instead of refusing until `config --pin` is typed again.
+function inheritWorktreePin(
+  projectDir: string,
+  version: string,
+  pins: Readonly<Record<string, string>>,
+): boolean {
+  if (!existsSync(projectDir)) return false;
+  const common = gitCommonDir(projectDir);
+  if (common === null) return false;
+  const sibling = Object.entries(pins).find(([path, pinned]) =>
+    pinned === version && existsSync(path) && gitCommonDir(path) === common
+  );
+  if (!sibling) return false;
+  try {
+    commitProjectPin(projectDir, version);
+    return true;
+  } catch {
+    return false;
   }
 }
 
