@@ -113,4 +113,21 @@ describe("a revising Unit stays finishable from its own checkout", () => {
     expect(validateDirective(ask).valid).toBe(true);
   });
 
+
+  test("4: a team Unit's revising ask offers no stage restart while the completion or the review is on offer", () => {
+    const refusal = evaluateGuardRefusal({
+      code: "UNIT_COMPLETION_MISSING",
+      blockedAction: "present-approval-gate",
+      stage: SLUG,
+      unit: "alpha",
+      stateContent: `# State\n- **Unit Ownership**: team\n- [-] ${SLUG} ${SEP} EXECUTE\n`,
+      invariant: "The Unit lifecycle is complete in the current attempt.",
+      userMessage: "no current UNIT_COMPLETED receipt is recorded.",
+      attempt: { recovery: "available", summaryCoverage: "current", reviewCoverage: "current", sourceCoverage: "current" },
+      humanAuthority: { freshTurn: true, unattended: false },
+      teamGate: { resolved: true, scope: "per-stage", status: "revising", gateStage: SLUG },
+    });
+    // Its scoped checkout refuses the jump, and the per-Unit reopen does not model a team Unit's restart.
+    expect(refusal.remedies.map((remedy) => remedy.op)).toEqual(["record-unit-completion", "finish-revision"]);
+  });
 });

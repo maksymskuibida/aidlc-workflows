@@ -149,7 +149,6 @@ import {
   recordGuardStoodAside,
   unattendedHumanPresenceHint,
   intentRepos,
-  teamsAcrossReposLine,
   isGitRepoDir,
   isValidRepoName,
   repoDir,
@@ -1704,10 +1703,6 @@ function handleSetUnitOwnership(given: string[]): void {
       );
     }
     if (value === "team") {
-      const repos = intentRepos(pd);
-      if (repos.length > 0) {
-        error(`${teamsAcrossReposLine(repos.length)} Carry on with \`${entrySkillInvocation()}\`.`);
-      }
       const resolution = resolveBoltDag(pd);
       if (resolution.state === "none") {
         error(
@@ -2223,16 +2218,21 @@ function handleFoldUnitMerge(args: string[]): void {
       `Unit "${unit}" merge commit ${mergeCommitOid} is not present on main.`,
     );
   }
-  const parents = spawnSync(
-    "git",
-    ["show", "-s", "--format=%P", mergeCommitOid],
-    { cwd: pd, encoding: "utf-8" },
-  );
-  if (
-    parents.status !== 0 ||
-    parents.stdout.trim().split(/\s+/)[1] !== pinnedOid
-  ) {
-    error(`Unit "${unit}" has no controlled merge commit for pinned OID ${pinnedOid}.`);
+  // A pull-request landing records the integration tip that carries the
+  // candidate's content (the platform's squash or merge commit), so the pinned
+  // claim is never one of its parents; the land step verified the content.
+  if (transaction.strategy !== "pr") {
+    const parents = spawnSync(
+      "git",
+      ["show", "-s", "--format=%P", mergeCommitOid],
+      { cwd: pd, encoding: "utf-8" },
+    );
+    if (
+      parents.status !== 0 ||
+      parents.stdout.trim().split(/\s+/)[1] !== pinnedOid
+    ) {
+      error(`Unit "${unit}" has no controlled merge commit for pinned OID ${pinnedOid}.`);
+    }
   }
   const mainShard = auditShardName(pd);
   const mainRows = readAuditShardEvents(pd)
@@ -2264,7 +2264,8 @@ function handleFoldUnitMerge(args: string[]): void {
     encoding: "utf-8",
   });
   if (
-    gateStrategy !== "merge" ||
+    (gateStrategy !== "merge" && gateStrategy !== "pr") ||
+    gateStrategy !== (transaction.strategy ?? "merge") ||
     !gateTarget ||
     branch.status !== 0 ||
     branch.stdout.trim() !== gateTarget ||
