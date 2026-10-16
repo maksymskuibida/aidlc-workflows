@@ -1945,7 +1945,6 @@ takeActiveDirectiveReleaseHeld
 takeSessionSelectionNotice
 teamSkeletonOn
 teamUnitGateStatus
-teamsAcrossReposLine
 terminalCommandFromKnowledgeCommand
 terminalCommandFromPluginCommand
 terminalCommandFromWorkspaceCommand

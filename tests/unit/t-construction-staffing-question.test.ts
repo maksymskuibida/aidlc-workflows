@@ -1,4 +1,4 @@
-// covers: subcommand:aidlc-orchestrate:next, subcommand:aidlc-state:set-unit-ownership, audit:UNIT_OWNERSHIP_SET, audit:CONSTRUCTION_POLICY_SET, function:teamsAcrossReposLine
+// covers: subcommand:aidlc-orchestrate:next, subcommand:aidlc-state:set-unit-ownership, audit:UNIT_OWNERSHIP_SET, audit:CONSTRUCTION_POLICY_SET
 //
 // Who builds the Units is asked once, by the engine, as Inception ends (#1395).
 // A plan of two or more Units reached Construction with nobody asked: the
@@ -58,8 +58,6 @@ const DEFAULT_LINE = "This session builds the 2 Units one after another. To have
   "instead, say so before the first Unit is built.";
 const APPROVALS_LINE = "Each team will approve its Unit after every stage. Do you want them to approve once at the " +
   "end of each Unit instead? I'd keep after every stage, so a wrong turn is caught at the stage where it happens.";
-const REPOS_LINE = "This work spans 2 repos, so this session builds its 2 Units: teams each owning a Unit is " +
-  "not available yet for work across repos.";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -401,22 +399,20 @@ describe("who builds the Units is asked once as Inception ends", () => {
     expect(isStaffingAsk(next(proj))).toBe(true);
   });
 
-  test("work that spans several repos is not asked: one true line, once", () => {
+  test("work that spans several repos is asked like any other, and teams can be chosen", () => {
+    // Each team's Unit lands through the repositories' pull requests (strategy
+    // pr), so the question is the same and the answer is accepted.
     const proj = project();
     const registryPath = join(proj, "aidlc", "spaces", "default", "intents", "intents.json");
     const registry = JSON.parse(readFileSync(registryPath, "utf-8")) as Array<Record<string, unknown>>;
     registry[0].repos = ["api", "web"];
     writeFileSync(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
     const step = next(proj, [], CHAT);
-    expect(step.kind, JSON.stringify(step)).toBe("run-stage");
-    expect(step.change_notices ?? []).toContain(REPOS_LINE);
-    expect(next(proj, [], CHAT).change_notices ?? []).not.toContain(REPOS_LINE);
-    const before = state(proj);
+    expect(isStaffingAsk(step), JSON.stringify(step)).toBe(true);
+    expect(JSON.stringify(step)).not.toContain("not available yet for work across repos");
     const teams = runState(proj, ["set-unit-ownership", "team"]);
-    expect(teams.rc).not.toBe(0);
-    expect(teams.out).toContain("This work spans 2 repos, so this session builds its Units: teams each owning " +
-      "a Unit is not available yet for work across repos. Carry on with `/aidlc`.");
-    expect(state(proj)).toBe(before);
+    expect(teams.rc, teams.out).toBe(0);
+    expect(field(state(proj), "Unit Ownership")).toBe("team");
   });
 
   test("Delivery Planning no longer carries the question in prose", () => {

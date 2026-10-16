@@ -2064,6 +2064,7 @@ const FLAG_ENV_FIELDS: Array<{
   { env: "AWS_AIDLC_DEFAULT_SCOPE", field: "defaultScope" },
   { env: "AIDLC_USE_SWARM", field: "swarm" },
   { env: "AIDLC_HOOK_DEBUG", field: "hookDebug" },
+  { env: "AIDLC_PR_REQUIRE_APPROVAL", field: "pullRequestApproval" },
   { env: "AIDLC_SENSOR_TIMEOUT_MS", field: "sensorTimeoutMs" },
   { env: "AIDLC_QUESTION_RETENTION_DAYS", field: "questionRetentionDays" },
 ];
@@ -2159,9 +2160,14 @@ export function flagIssues(
         id: `flag-env-override-${envName.toLowerCase().replaceAll("_", "-")}`,
         message:
           `${envName}=${JSON.stringify(env[envName])} overrides the recorded answer ${
-            envName === "AIDLC_USE_SWARM" || envName === "AIDLC_HOOK_DEBUG"
+            envName === "AIDLC_USE_SWARM" || envName === "AIDLC_HOOK_DEBUG" ||
+              envName === "AIDLC_PR_REQUIRE_APPROVAL"
               ? record[
-                  envName === "AIDLC_USE_SWARM" ? "swarm" : "hookDebug"
+                  envName === "AIDLC_USE_SWARM"
+                    ? "swarm"
+                    : envName === "AIDLC_HOOK_DEBUG"
+                      ? "hookDebug"
+                      : "pullRequestApproval"
                 ] === true
                 ? "on"
                 : "off"

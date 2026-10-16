@@ -668,9 +668,9 @@ a line waits past the step that settles the walking skeleton's stance, which
 the agent passes through without speaking. Showing the question notes an engine ask mark; once a
 human turn is on record after it with no answer recorded, the question is not
 put again and the first step carries one line that this session builds the
-Units and how to ask for teams. Work with recorded repos is never asked: the
-first step carries `teamsAcrossReposLine` instead, the line the setter's
-refusal also says.
+Units and how to ask for teams. Work with recorded repos is asked the same
+way: each team's Unit lands through the repositories' pull requests (strategy
+`pr`, `aidlc unit pr` and `aidlc unit finish`).
 
 Which repos Reverse Engineering reads is asked the same way, once per work
 (`reverseEngineeringScopeAsk`). When the step `next` would route is Reverse
