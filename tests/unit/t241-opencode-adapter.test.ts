@@ -142,6 +142,7 @@ function copyCore(root: string, relativePath: string): void {
       "aidlc-settings.ts",
       "aidlc-markdown.ts",
       "aidlc-locks.ts",
+      "aidlc-git-metadata.ts",
       "aidlc-review-records.ts",
       "aidlc-learned-date.ts",
       "aidlc-kiro-chat-record.ts",

@@ -3,6 +3,14 @@ import { lockFolderHeldGiveUpMs, lockFolderHeldLine } from "./aidlc-lock-line.ts
 import { reviewManifestForms } from "./aidlc-review-manifest.ts";
 import { withoutLearnedDate } from "./aidlc-learned-date.ts";
 import { KIRO_SESSION_DIR_RE, kiroChatRecordPaths } from "./aidlc-kiro-chat-record.ts";
+import {
+  boundedGitMetadataText,
+  canonicalPathKey,
+  gitCommonDirectory,
+  gitMetadataDirectory,
+  mainCheckoutOfWorktree,
+  singleGitMetadataLine,
+} from "./aidlc-git-metadata.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { accessSync, chmodSync, closeSync, constants as fsConstants, cpSync, type Dirent, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
@@ -3742,15 +3750,6 @@ export function classifyRuntimeCompileCommand(
   return "pass";
 }
 
-function canonicalPathKey(path: string): string {
-  const resolved = resolvePath(path);
-  try {
-    return realpathSync(resolved);
-  } catch {
-    return resolved;
-  }
-}
-
 // `aidlc/spaces/<space>/knowledge` — SPACE DOMAIN knowledge (durable, free-form,
 // team-authored, empty at bootstrap). A space-level sibling of memory/codekb/
 // intents (vision §"Spaces": "its own memory, codekb, knowledge, and intent
@@ -3838,13 +3837,23 @@ export function validSpaceFlag(raw: string): string | null {
 // only by intent create and switch on this machine, so unlike a lone committed
 // record it is local evidence of a choice.
 export function readActiveIntentCursor(projectDir: string, space?: string): string | null {
-  const dir = intentsDir(projectDir, space ?? activeSpace(projectDir));
+  const sp = space ?? activeSpace(projectDir);
+  const dir = intentsDir(projectDir, sp);
+  let raw: string;
   try {
-    const raw = readFileSync(join(dir, ACTIVE_INTENT_POINTER), "utf-8").trim();
-    if (raw.length > 0 && existsSync(join(dir, raw, "aidlc-state.md"))) return raw;
+    raw = readFileSync(join(dir, ACTIVE_INTENT_POINTER), "utf-8").trim();
   } catch {
-    // no cursor
+    // No cursor: a git worktree reads its main checkout's (activeSpace).
+    const main = mainCheckoutOfWorktree(projectDir);
+    if (main === null) return null;
+    try {
+      raw = readFileSync(join(intentsDir(main, sp), ACTIVE_INTENT_POINTER), "utf-8").trim();
+    } catch {
+      return null;
+    }
+    if (!INTENT_SELECTOR_REGEX.test(raw)) return null;
   }
+  if (raw.length > 0 && existsSync(join(dir, raw, "aidlc-state.md"))) return raw;
   return null;
 }
 
@@ -24987,114 +24996,6 @@ interface FilesystemSourceIdentity {
 }
 
 type SourceSymlinkTargetMode = "follow" | "tree-only";
-
-function boundedGitMetadataText(path: string, maxBytes: number): string | null {
-  let fd: number | undefined;
-  try {
-    const pathStat = lstatSync(path);
-    if (!pathStat.isFile() || pathStat.size > maxBytes) return null;
-    fd = openSync(path, "r");
-    const before = fstatSync(fd);
-    if (!before.isFile() || before.size > maxBytes) return null;
-    const bytes = Buffer.alloc(before.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const count = readSync(
-        fd,
-        bytes,
-        offset,
-        bytes.length - offset,
-        offset,
-      );
-      if (count === 0) return null;
-      offset += count;
-    }
-    const after = fstatSync(fd);
-    if (
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs ||
-      before.ctimeMs !== after.ctimeMs
-    ) {
-      return null;
-    }
-    return bytes.toString("utf-8");
-  } catch {
-    return null;
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        // The metadata read already fails closed on any earlier error.
-      }
-    }
-  }
-}
-
-function singleGitMetadataLine(raw: string): string | null {
-  const line = raw.replace(/\r?\n$/, "");
-  if (line.length === 0 || line.includes("\n") || line.includes("\r")) {
-    return null;
-  }
-  return line;
-}
-
-function gitMetadataDirectory(worktreeDir: string): string | null {
-  const marker = join(worktreeDir, ".git");
-  try {
-    const markerStat = lstatSync(marker);
-    if (markerStat.isDirectory()) return realpathSync(marker);
-    if (!markerStat.isFile()) return null;
-  } catch {
-    return null;
-  }
-  const pointerRaw = boundedGitMetadataText(marker, 8192);
-  const pointerLine =
-    pointerRaw === null ? null : singleGitMetadataLine(pointerRaw);
-  if (pointerLine === null || !pointerLine.startsWith("gitdir: ")) {
-    return null;
-  }
-  const pointer = pointerLine.slice("gitdir: ".length);
-  if (pointer.length === 0 || pointer.includes("\0")) return null;
-  const target = isAbsolute(pointer)
-    ? pointer
-    : resolvePath(worktreeDir, pointer);
-  try {
-    if (!lstatSync(target).isDirectory()) return null;
-    return realpathSync(target);
-  } catch {
-    return null;
-  }
-}
-
-function gitCommonDirectory(gitDir: string): string | null {
-  const marker = join(gitDir, "commondir");
-  try {
-    if (!lstatSync(marker).isFile()) return null;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return gitDir;
-    return null;
-  }
-  const pointerRaw = boundedGitMetadataText(marker, 8192);
-  const pointerLine =
-    pointerRaw === null ? null : singleGitMetadataLine(pointerRaw);
-  if (
-    pointerLine === null ||
-    pointerLine.length === 0 ||
-    pointerLine.includes("\0")
-  ) {
-    return null;
-  }
-  const target = isAbsolute(pointerLine)
-    ? pointerLine
-    : resolvePath(gitDir, pointerLine);
-  try {
-    if (!lstatSync(target).isDirectory()) return null;
-    return realpathSync(target);
-  } catch {
-    return null;
-  }
-}
 
 type GitObjectType = "commit" | "other";
 
