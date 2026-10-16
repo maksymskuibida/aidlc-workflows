@@ -95,6 +95,9 @@ export type ProjectFlagsRecord = {
   defaultScope?: string;
   swarm?: boolean;
   hookDebug?: boolean;
+  // Strategy pr: the Unit's code pull requests must be approved on GitHub
+  // before the merge gate accepts them; off records the approvers it finds.
+  pullRequestApproval?: boolean;
   sensorTimeoutMs?: number;
   questionRetentionDays?: number;
   bypasses?: RecordableProjectBypass[];
@@ -153,6 +156,7 @@ const PROJECT_FLAG_KEYS = new Set([
   "defaultScope",
   "swarm",
   "hookDebug",
+  "pullRequestApproval",
   "sensorTimeoutMs",
   "questionRetentionDays",
   "bypasses",
@@ -221,7 +225,7 @@ export function normalizeProjectFlagsRecord(
     }
     out.defaultScope = value.defaultScope;
   }
-  for (const key of ["swarm", "hookDebug"] as const) {
+  for (const key of ["swarm", "hookDebug", "pullRequestApproval"] as const) {
     if (value[key] !== undefined && typeof value[key] !== "boolean") {
       throw new Error(`${where}.${key} must be true or false`);
     }
@@ -848,6 +852,7 @@ export const AIDLC_SETTINGS_SCHEMA = {
         defaultScope: { type: "string", pattern: "^[a-z][a-z0-9-]*$" },
         swarm: { type: "boolean" },
         hookDebug: { type: "boolean" },
+        pullRequestApproval: { type: "boolean" },
         sensorTimeoutMs: { type: "integer", minimum: 1 },
         questionRetentionDays: { type: "integer", minimum: 1 },
         bypasses: {

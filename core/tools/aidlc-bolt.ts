@@ -86,6 +86,7 @@ import {
   resolveInvokingSessionId,
 } from "./aidlc-lib.js";
 import { aidlcDispatcherInvocation, compiledExecutable, entrySkillInvocation } from "./aidlc-runtime-paths.ts";
+import { pullRequestMergeGateAsk } from "./aidlc-unit.ts";
 import { type EngineInvocation, renderEngineInvocation } from "./aidlc-guard-operation.ts";
 import {
   askConstructionCheckpoint,
@@ -1103,7 +1104,7 @@ function setMergeHeld(pd: string, slug: string, held: boolean, intent?: string, 
 // three literal emit calls; DISPATCH_EVENTS names the same three for the
 // messages and usage.
 const DISPATCH_EVENTS: readonly string[] = ["MERGE_DISPATCH_INVOKED", "MERGE_DISPATCH_RETURNED", "MERGE_DISPATCH_FALLBACK"];
-const MERGE_STRATEGIES: readonly string[] = ["squash", "merge", "rebase"];
+const MERGE_STRATEGIES: readonly string[] = ["squash", "merge", "rebase", "pr"];
 
 function handleDispatchEvent(args: string[]): void {
   const flags = parseFlags(args);
@@ -1180,7 +1181,21 @@ function handleDispatchEvent(args: string[]): void {
       } catch (e) {
         error(`Audit emission failed: ${errorMessage(e)}`);
       }
-      console.log(JSON.stringify({ emitted: "MERGE_DISPATCH_RETURNED", slug: flags.slug }));
+      // Under strategy pr the merge gate is the person's question about opening
+      // the workspace pull request; the engine words it, the conductor shows it.
+      const mergeGate = flags.strategy === "pr" ? pullRequestMergeGateAsk(pd, flags.slug) : null;
+      console.log(JSON.stringify({
+        emitted: "MERGE_DISPATCH_RETURNED",
+        slug: flags.slug,
+        ...(mergeGate
+          ? {
+              merge_gate: mergeGate,
+              merge_gate_note: "Say the context line, then ask the question as one structured question with exactly " +
+                "these two options, in these words; end the turn, and record the person's reply with " +
+                "`aidlc unit gate <unit> --decision approve|reject --user-input '<their words>'`.",
+            }
+          : {}),
+      }));
       return;
     }
     case "MERGE_DISPATCH_FALLBACK": {
