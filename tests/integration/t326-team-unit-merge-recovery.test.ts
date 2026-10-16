@@ -519,7 +519,10 @@ describe("t326 pinned team Unit merge", () => {
     expect(readAllAuditShards(seed)).toContain("**Event**: UNIT_MERGED");
   });
 
-  test("pin refuses incomplete rows and receipts outside a new team shard", () => {
+  test("pin derives the Unit's row from receipts and refuses receipts outside a new team shard", () => {
+    // The candidate's copy of aidlc-state.md is engine metadata a landing
+    // discards: a damaged row neither blocks pin nor reaches main, whose fold
+    // rewrites the row from the receipts.
     const rowFixture = makeSeed();
     const rowCandidate = prepareCandidate(
       rowFixture.remote,
@@ -536,10 +539,13 @@ describe("t326 pinned team Unit merge", () => {
     git(rowCandidate.checkout, ["add", "-A"]);
     git(rowCandidate.checkout, ["commit", "-m", "damage progress row"]);
     expect(runMergeTool(UNIT, ["publish", "alpha"], rowCandidate.checkout).status).toBe(0);
-    const badRow = runMergeTool(UNIT, ["pin", "alpha"], rowFixture.seed);
-    expect(badRow.status).not.toBe(0);
-    expect(badRow.out).toContain("functional-design");
-    expect(badRow.out).toContain("is not complete");
+    const damagedRow = runMergeTool(UNIT, ["pin", "alpha"], rowFixture.seed);
+    expect(damagedRow.status, damagedRow.out).toBe(0);
+    expect(JSON.parse(damagedRow.stdout).evidence.stages_completed).toContain("functional-design");
+    gateAndLand(rowFixture.seed, "alpha");
+    expect(unitProgressRow(rowFixture.seed, "alpha")).toBe(
+      "| alpha | row-team | [x] | [x] | [x] | [x] | [x] | [x] | [x] |",
+    );
 
     const shardFixture = makeSeed();
     const shardCandidate = prepareCandidate(
