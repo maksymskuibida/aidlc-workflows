@@ -312,24 +312,63 @@ online stale attempt, and warn once plus proceed from the stamp when offline.
 
 **Pinned Unit merge-back.** When the scoped Unit is complete, commit its tracked
 work and run `aidlc unit publish <unit>`; publication CAS-updates the claim ref
-but does not integrate it. On unscoped main, run `aidlc unit pin <unit>` and
-bracket the existing pipeline-deploy strategy lookup with
-`MERGE_DISPATCH_INVOKED` / `MERGE_DISPATCH_RETURNED` (or `_FALLBACK`), then
-present the returned pinned OID + evidence summary as one merge gate. Record the
-exact human answer with `aidlc unit gate <unit> --decision <approve|reject>
---user-input '<text>'`. On approval, `aidlc unit land <unit> --target <branch>`
-owns the transaction: pinned git content first with main-owned metadata retained,
-then one Unit-row fold under the intent lock, then audit/finalization. A moved
-claim ref requires re-pin, and an unavailable registry makes gate/land fail
-closed. If the exact attempt is released only after the git step landed, inspect
-the merge and continue explicitly with `aidlc unit land <unit>
---accept-released-attempt --user-input '<human acknowledgment>'`; a successor
-claim is never accepted. Source conflicts abort before state folding. For
-crash recovery the same command accepts `--step git|state|audit`; each step is
-idempotent and `aidlc unit merge-status <unit>` reports the local journal.
-The dispatch bracket must be newer than the pin and followed by a typed human
-turn. This transaction deliberately requires strategy `merge` so the reviewed
-pinned OID remains a direct parent; a returned squash/rebase decision is refused.
+but does not integrate it. Two strategies land it; the dispatch bracket names
+which. On unscoped main, run `aidlc unit pin <unit>` and bracket the existing
+pipeline-deploy strategy lookup with `MERGE_DISPATCH_INVOKED` /
+`MERGE_DISPATCH_RETURNED` (or `_FALLBACK`), then present the returned pinned
+OID + evidence summary as one merge gate. Record the exact human answer with
+`aidlc unit gate <unit> --decision <approve|reject> --user-input '<text>'`. On
+approval, `aidlc unit land <unit> --target <branch>` owns the transaction:
+pinned git content first with main-owned metadata retained, then one Unit-row
+fold under the intent lock, then audit/finalization. A moved claim ref requires
+re-pin, and an unavailable registry makes gate/land fail closed. If the exact
+attempt is released only after the git step landed, inspect the merge and
+continue explicitly with `aidlc unit land <unit> --accept-released-attempt
+--user-input '<human acknowledgment>'`; a successor claim is never accepted.
+Source conflicts abort before state folding. For crash recovery the same
+command accepts `--step git|state|audit`; each step is idempotent and
+`aidlc unit merge-status <unit>` reports the local journal. The dispatch
+bracket must be newer than the pin and followed by a typed human turn. The
+`merge` strategy requires the reviewed pinned OID to remain a direct parent; a
+returned squash/rebase decision is refused.
+
+**Pull-request landing (strategy `pr`).** Where `main` takes only reviewed
+pull requests, the dispatch returns strategy `pr` with the Unit's own branch
+as target, and the Unit is closed from the checkout or worktree that built it:
+the code's pull request(s) in the code repositories, opened with `aidlc unit
+pr <unit> --repo <name>` from each repository's pushed branch (title
+the Unit's title or `--title`, body that repository's own pull request
+template or `--body-file`, which carry a team's own conventions, or only the
+`## AI-DLC Unit` section where it has none, when
+pr's output carries a `notice` to say once), are reviewed and merged first; then, on the Unit's branch, `aidlc
+unit pin <unit>`, the dispatch bracket (the two commands pin prints as `dispatch.invoked` and
+`dispatch.returned`, its values filled in; the returned one's output carries the merge gate as
+`merge_gate`: say its context line, then ask its question with its two options exactly as
+given), `aidlc unit gate <unit> --decision
+approve --user-input '<text>'` (the code pull requests `pr` recorded, or `--pr
+<owner>/<repo>#<n>[,...]`; each is read from GitHub and must be merged, and
+approved when the project requires it with `aidlc config flags
+--pull-request-approval on`; the gate row records the reviewers it finds, the
+head and merge commits), and
+`aidlc unit land <unit>`. Land verifies each pull request's merge commit and
+content on that repository's integration branch, folds the Unit row and
+`UNIT_MERGED` into this branch, and commits; `aidlc unit pr <unit>` then opens
+the branch's own pull request, which carries the record and the fold to
+`main`. `main` moving before land: commit what the gate wrote, bring `main`
+into the branch, and run `aidlc unit land <unit>` again; the approved pin
+still lands it, and only when land answers that the integration evidence
+changed do you publish, pin, bracket and gate again. Moving after land, while the pull request is open, means
+rebase and `aidlc unit land <unit> --refold`, which re-runs the fold on the
+rebased branch. Pull requests may be opened from the Unit's branch only, never
+from the claim ref. Once the pull request is merged, `aidlc unit finish <unit>`
+in the same checkout verifies that `main` carries exactly the head land left
+behind, deletes the Unit's claim ref, ends the checkout's scope, and either returns a main checkout to the
+integration branch (then `next` picks the next Unit) or hands a worktree the
+one command that removes it. Content merged after land is refused until a
+person inspects it and accepts it with `--accept-merged-drift --user-input
+'<text>'`, which records `UNIT_MERGE_DRIFT_ACCEPTED` and opens a record-only
+follow-up pull request for that row. A claim from a checkout still scoped to a
+merged Unit is refused until that Unit is finished.
 The candidate may transport one claim-bound new audit shard containing that
 team's own attempt-keyed lifecycle, team-gate, and reviewer receipts. These are
 team assertions rechecked against artifacts/fingerprints and judged at the main

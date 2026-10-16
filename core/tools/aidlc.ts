@@ -251,11 +251,13 @@ export const ROUTES: readonly Route[] = [
     verbs: [
       "adopt",
       "claim",
+      "finish",
       "gate",
       "land",
       "merge-status",
       "participate",
       "pin",
+      "pr",
       "publish",
       "release",
       "status",
@@ -267,11 +269,13 @@ export const ROUTES: readonly Route[] = [
     all: [
       "unit adopt <unit>",
       "unit claim <unit>",
-      "unit gate <unit> --decision <approve|reject> --user-input <text>",
-      "unit land <unit> [--step git|state|audit|all] [--target <branch>] [--accept-released-attempt --user-input <text>]",
+      "unit finish <unit> [--pr <owner>/<repo>#<n>] [--accept-merged-drift --user-input <text> [--branch <name>]]",
+      "unit gate <unit> --decision <approve|reject> --user-input <text> [--pr <owner>/<repo>#<n>[,...]]",
+      "unit land <unit> [--step git|state|audit|all] [--target <branch>] [--strategy merge|pr] [--refold] [--accept-released-attempt --user-input <text>]",
       "unit merge-status <unit>",
       "unit participate",
       "unit pin <unit>",
+      "unit pr <unit> [--repo <name>] [--draft] [--title <text>] [--body-file <path>]",
       "unit publish <unit>",
       "unit release <unit>",
       "unit status",
@@ -421,7 +425,7 @@ export const ROUTES: readonly Route[] = [
       "config runtime [--show [--json]|--check|--record-paths|--reset] [--dry-run] [--yes] [--download [--release-base-url <url>] [--ca-bundle <path>]]",
       "config providers [--show [--json]|--check|--reset|--provider <current|amazon-bedrock|other>] [--region <region>] [--profile <profile>] [--opencode-default <yes|no>] [--acknowledge] [--mark-done <id>] [--dry-run] [--yes] [--download [--release-base-url <url>] [--ca-bundle <path>]]",
       "config trust [--show [--json]|--check|--acknowledge|--kiro-workflows <on|off>|--kiro-terminal powershell|--reset] [--dry-run] [--yes] [--download [--release-base-url <url>] [--ca-bundle <path>]]",
-      "config flags [--show [--json]|--check|--reset] [--default-scope <name>] [--swarm <on|off>] [--hook-debug <on|off>] [--sensor-timeout-ms <n>] [--question-retention-days <days|unlimited>] [--bypass <name>] [--clear-bypass <name>] [--local|--project|--global] [--dry-run] [--yes] [--download [--release-base-url <url>] [--ca-bundle <path>]]",
+      "config flags [--show [--json]|--check|--reset] [--default-scope <name>] [--swarm <on|off>] [--hook-debug <on|off>] [--pull-request-approval <on|off>] [--sensor-timeout-ms <n>] [--question-retention-days <days|unlimited>] [--bypass <name>] [--clear-bypass <name>] [--local|--project|--global] [--dry-run] [--yes] [--download [--release-base-url <url>] [--ca-bundle <path>]]",
       "config project [--show [--json]|--check|--reset] [--plugins <names|all>] [--mcp <defaults|none>] [--completions <shell|none>] [--dry-run] [--yes] [--download [--release-base-url <url>] [--ca-bundle <path>]]",
       "config --pin <version> [--from <dir>] [--release-base-url <url>] [--ca-bundle <path>] [--offline]",
       "config --statusline <on|off> [--harness <claude|codex>] [--dry-run] [--json] [--project-dir <path>]",
@@ -2072,9 +2076,25 @@ function resolveSystem(argv: string[]): Action {
 function resolvePublicNoun(argv: string[]): Action | undefined {
   const noun = argv[0];
   const verb = argv[1];
-  for (const route of ROUTES.filter((item) =>
+  const routes = ROUTES.filter((item) =>
     item.namespace === "public" && item.group !== "top" && item.group === noun
-  )) {
+  );
+  // A public noun typed bare, or asked for help, lists its verbs: the noun is
+  // not in the top-level help, so this is where a person or an agent finds
+  // what it does.
+  if (routes.length > 0 && (!verb || verb === "--help" || verb === "-h" || verb === "help")) {
+    const invoke = aidlcInvocation();
+    const lines = routes.flatMap((route) => route.all ?? route.verbs.map((item) => `${noun} ${item}`));
+    return {
+      type: "stub",
+      code: 0,
+      message:
+        `${invoke} ${noun} <verb> [args]\n\n` +
+        lines.map((line) => `  ${invoke} ${line}`).join("\n") +
+        `\n\nEach verb explains its own arguments when they are missing.\n`,
+    };
+  }
+  for (const route of routes) {
     if (!verb || !route.verbs.includes(verb)) continue;
     if (route.kind === "noun-passthrough" && route.tool) {
       return {

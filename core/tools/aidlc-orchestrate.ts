@@ -265,7 +265,6 @@ import {
   noteProjectTypeAsked,
   constructionStaffingPassedOver,
   noteConstructionStaffingAsked,
-  teamsAcrossReposLine,
   isRefusedModifierNextArgv,
   isRetiredOnlyNextArgv,
   isRegularFile,
@@ -479,6 +478,7 @@ import { resolveSwarmCheckpoint } from "./aidlc-swarm-checkpoints.ts";
 import {
   cachedUnitClaimOverview,
   localUnitClaimOverviewForIntent,
+  unitLandsThroughPullRequests,
   type UnitClaimOverview,
   type UnitClaimView,
 } from "./aidlc-unit.ts";
@@ -4037,11 +4037,6 @@ function constructionStaffingAsk(
     return null;
   }
   const order = readConstructionIteration(stateContent) === "unit-major" ? "one after another" : "stage by stage";
-  const repos = intentRepos(projectDir);
-  if (repos.length > 0) {
-    if (speaks) sayWithStepOnce(projectDir, teamsAcrossReposLine(repos.length, units));
-    return null;
-  }
   if (constructionStaffingPassedOver(projectDir)) {
     if (speaks) {
       sayWithStepOnce(
@@ -4140,7 +4135,7 @@ function teamFanoutHoldsCheckout(pd: string, stateContent: string): boolean {
 
 // A merge transaction the board lists as awaiting its merge.
 function mergeTransactionOpen(transaction: { status: string }): boolean {
-  return transaction.status !== "complete";
+  return transaction.status !== "complete" && transaction.status !== "finished";
 }
 
 function noticeDirective(message: string): NoticeDirective {
@@ -4316,7 +4311,7 @@ function initialUnitProgressSection(
         stages.map(() => "[ ]").join(" | ")
       } | [ ] |${
         mergeTracking
-          ? ` ${transaction?.status === "complete" ? "[x]" : "[ ]"} |`
+          ? ` ${transaction?.status === "complete" || transaction?.status === "finished" ? "[x]" : "[ ]"} |`
           : ""
       }`;
     }),
@@ -13318,11 +13313,7 @@ function emitTeamUnitMajorRunStage(
     return;
   }
   if (scopeStamp) {
-    emit(noticeDirective(
-      `Unit "${scopeStamp.unit}" is complete and approved in this checkout. ` +
-        `Commit the completed candidate and run \`aidlc unit publish ${scopeStamp.unit}\`; ` +
-        "unscoped main will pin, gate, and land it.",
-    ));
+    emit(noticeDirective(unitApprovedNotice(projectDir, scopeStamp.unit)));
     return;
   }
   const next = nextInScopeStage(finalStage.slug, scope, refreshedState);
@@ -13370,6 +13361,34 @@ function teamUnitNextStageName(
 
 function teamUnitLandingName(unit: string): string {
   return `landing Unit ${unit}`;
+}
+
+// What a scoped checkout does once its Unit is approved. The landing strategy
+// is the dispatch's answer, not a setting, so before any pull request is
+// recorded the notice names both paths; once `unit pr` recorded one, the Unit
+// lands through pull requests and only that path is named.
+function unitApprovedNotice(projectDir: string, unit: string): string {
+  const prPath =
+    "this checkout closes it, in this order: " +
+    `\`aidlc unit pr ${unit} --repo <name>\` from each code repository's pushed branch, ` +
+    "and those pull requests merged; " +
+    `\`aidlc unit pin ${unit}\`, then the two dispatch commands its output prints (\`dispatch.invoked\`, \`dispatch.returned\`); ` +
+    `\`aidlc unit gate ${unit} --decision approve --user-input '<text>'\`; ` +
+    `\`aidlc unit land ${unit}\` and a push of this branch; \`aidlc unit pr ${unit}\` for this branch; ` +
+    `once that pull request is merged, \`aidlc unit finish ${unit}\`. ` +
+    "Nothing runs from the unscoped main checkout.";
+  const head =
+    `Unit "${unit}" is complete and approved in this checkout. ` +
+    "Commit everything this checkout changed, the Unit's record with the state and audit changes the engine just wrote, " +
+    `then run \`aidlc unit publish ${unit}\`. `;
+  if (unitLandsThroughPullRequests(projectDir, unit)) {
+    return head + `This Unit lands through pull requests (strategy pr): ${prPath}`;
+  }
+  return (
+    head +
+    "Where main takes merges, unscoped main then pins, gates and lands it. " +
+    `Where main takes only pull requests (strategy pr), ${prPath}`
+  );
 }
 
 // The first stop of the solo unit-major walk, without emitting it. Units walk
