@@ -713,14 +713,12 @@ boltName
 boltSlugForUnit
 boltWorktreeBaseCommit
 boundDirectiveMessage
-boundedGitMetadataText
 boxPicksAddANote
 cachedClaimFanoutActive
 cachedMacProcessTable
 candidateAttemptEventMatches
 candidateReviewCoverageProjection
 canonicalEngineCommand
-canonicalPathKey
 carryPendingPersonLines
 ceremonyOffList
 ceremonyPolicyValues
@@ -975,9 +973,7 @@ generatedRunnerSkill
 getField
 gitAlternateEntry
 gitCommitSourceListing
-gitCommonDirectory
 gitHeadOid
-gitMetadataDirectory
 gitObjectDirectories
 gitObjectTypeByOid
 gitOidFromRef
@@ -1801,7 +1797,6 @@ shellCommandText
 shellToolResponseText
 shippedRulesSubdir
 shownLastWrittenAt
-singleGitMetadataLine
 singleRunRequest
 singleRunRequestDigest
 singleStageAttemptField

@@ -9022,6 +9022,19 @@ function handleUpgrade(): void {
 // intent / space — the verb families + the deterministic query layer
 // ---------------------------------------------------------------------------
 
+// The one line that says where this project's work is when the active space
+// has none and exactly one other space does (a checkout whose cursor names an
+// empty space), with the switch that selects it; "" otherwise.
+export function otherSpaceWithWorkLine(projectDir: string, space: string): string {
+  if (listIntentDirs(projectDir, space).length > 0) return "";
+  const holding = listSpaces(projectDir, space)
+    .map((entry) => entry.name)
+    .filter((name) => name !== space && listIntentDirs(projectDir, name).length > 0);
+  return holding.length === 1
+    ? ` This project's work is in space "${holding[0]}": select it with \`${aidlcInvocation()} engine space switch ${holding[0]}\`.`
+    : "";
+}
+
 // Print an intent listing (the query layer's human OR --json mode). Both modes
 // read the SAME listSpaces/listIntents source so they never diverge. --json
 // shape: {active, spaces:[...], intents:[{uuid,slug,status,repos}]} — consumed
@@ -9058,7 +9071,7 @@ function printIntentListing(
   }
   if (intents.length === 0) {
     process.stdout.write(
-      `No intents in space "${space}" yet. Start one by describing what to build: ${entrySkillInvocation()} "build the auth service"\n`
+      `No intents in space "${space}" yet.${otherSpaceWithWorkLine(projectDir, space)} Start one by describing what to build: ${entrySkillInvocation()} "build the auth service"\n`
     );
     return;
   }

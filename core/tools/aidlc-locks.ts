@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve as resolvePath, sep, win32 } from "node:path";
 import { dlopen, FFIType, type Pointer } from "bun:ffi";
 import { knownActiveSpace } from "./aidlc-runtime-paths.ts";
+import { mainCheckoutOfWorktree } from "./aidlc-git-metadata.ts";
 
 export const ENGINE_DIR = ".aidlc-engine";
 // Debris the pre-lock (#749-era) marker writer could leave at the record root.
@@ -60,7 +61,18 @@ export function activeSpace(projectDir: string): string {
   try {
     return knownActiveSpace(workspaceRoot(projectDir), readFileSync(ptr, "utf-8"));
   } catch {
-    // no cursor → default
+    // no cursor → the main checkout's, for a git worktree; else default
+  }
+  const main = mainCheckoutOfWorktree(projectDir);
+  if (main !== null) {
+    try {
+      return knownActiveSpace(
+        workspaceRoot(projectDir),
+        readFileSync(join(workspaceRoot(main), ACTIVE_SPACE_POINTER), "utf-8"),
+      );
+    } catch {
+      // the main checkout has no cursor either
+    }
   }
   return DEFAULT_SPACE;
 }

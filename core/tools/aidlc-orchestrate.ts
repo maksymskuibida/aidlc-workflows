@@ -605,6 +605,7 @@ import {
   documentInputLooksSecret,
   GREENFIELD_RE_SKIP_LABEL,
   greenfieldWorkspaceGainedCode,
+  otherSpaceWithWorkLine,
   plansReopeningFinishedWork,
   projectTypeRecordedAsPersons,
   scanSummary,
@@ -12032,7 +12033,7 @@ function routeNext(agentArgs: string[], projectDir: string | undefined): void {
       return;
     }
     emit(errorDirective(
-      "No workflow state found (no active intent). " +
+      `No workflow state found (no active intent).${otherSpaceWithWorkLine(pd, selection.space)} ` +
         `Start one by describing what to build (${entrySkillInvocation()} "build the auth service") ` +
         `or by naming a scope (${entrySkillInvocation()} --scope <scope>).`,
     ));
