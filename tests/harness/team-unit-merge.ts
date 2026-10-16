@@ -528,6 +528,12 @@ export function prepareCandidate(
     /** Leave the Unit's row of the candidate's aidlc-state.md as main had it
      *  instead of marking it complete: the row is derived from receipts. */
     keepRow?: boolean;
+    /** Build in this existing checkout (a clone or a worktree the case made)
+     *  instead of a fresh clone of the remote. */
+    checkout?: string;
+    /** After the claim, build on this new branch instead of the clone's
+     *  checked-out one: the branch a pull request is opened from. */
+    branch?: string;
     /** The per-Unit stages the Unit has worked, in order; the default is all
      *  five. A case that stops partway leaves the rest to the walk. */
     stages?: string[];
@@ -544,10 +550,11 @@ export function prepareCandidate(
   generation: number;
   auditShard: string;
 } {
-  const checkout = clone(remote, label);
+  const checkout = options.checkout ?? clone(remote, label);
   if (options.crlf) git(checkout, ["config", "core.autocrlf", "false"]);
   const claim = runMergeTool(UNIT, ["claim", unit, "--team", label], checkout);
   expect(claim.status, claim.out).toBe(0);
+  if (options.branch) git(checkout, ["switch", "-c", options.branch]);
   options.afterClaim?.(checkout);
   const claimPayload = JSON.parse(claim.stdout);
   const generation = claimPayload.generation as number;
@@ -883,7 +890,8 @@ export function dispatchMerge(
   unit: string,
   pinnedOid: string,
   generation = 1,
-): void {
+  decision: { strategy: string; target: string } = { strategy: "merge", target: "main" },
+): Record<string, unknown> {
   const pinId = readUnitMergeTransaction(main, unit)?.pin_id;
   expect(pinId).toBeTruthy();
   const invoked = runMergeTool(
@@ -921,9 +929,9 @@ export function dispatchMerge(
       "--pin-id",
       pinId!,
       "--strategy",
-      "merge",
+      decision.strategy,
       "--target",
-      "main",
+      decision.target,
       "--confidence",
       "1",
       "--notes",
@@ -932,6 +940,10 @@ export function dispatchMerge(
     main,
   );
   expect(returned.status, returned.out).toBe(0);
+  const printed = JSON.parse(returned.stdout) as Record<string, unknown>;
+  // Only a pull-request landing asks the person about opening a pull request.
+  if (decision.strategy !== "pr") expect(printed.merge_gate).toBeUndefined();
+  return printed;
 }
 
 export function appendMainHumanTurn(projectDir: string): void {
@@ -963,6 +975,13 @@ export function approveMerge(
   expect(pin.status, pin.out).toBe(0);
   const pinPayload = JSON.parse(pin.stdout);
   const pinnedOid = pinPayload.pinned_oid as string;
+  // Unscoped main merges the Unit into its own branch: the bracket pin prints
+  // names strategy merge and this branch as the target.
+  expect(pinPayload.dispatch).toMatchObject({ strategy: "merge" });
+  expect(pinPayload.dispatch.returned).toContain(
+    `--pinned-oid ${pinnedOid} --attempt-generation ${pinPayload.generation} --pin-id ${pinPayload.pin_id} ` +
+      `--strategy merge --target ${git(main, ["branch", "--show-current"])} `,
+  );
   dispatchMerge(main, unit, pinnedOid, pinPayload.generation);
   const gate = runMergeTool(
     UNIT,

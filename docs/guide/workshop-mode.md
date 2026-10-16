@@ -9,12 +9,12 @@ engine contract is scope-agnostic:
 - a valid Unit dependency DAG
 - a shared git namespace, or sibling worktrees sharing one local ref database
 
-Team ownership currently requires the workspace root itself to be the source Git
-repository. Work with a recorded sibling-repo set is not asked who builds its
-Units: when Construction starts, AI-DLC says in one line that this session
-builds them, because teams each owning a Unit is not available yet for work
-across repos, and `set-unit-ownership team` refuses with the same line before
-changing state.
+Team ownership works with the workspace root as the source Git repository and
+with a recorded sibling-repo set alike. Across repositories each team's Unit
+lands through the repositories' reviewed pull requests (strategy `pr`): the
+code pull requests first, then one workspace pull request with the Unit's
+record; `aidlc unit pr` opens them and `aidlc unit finish` closes the checkout
+once the workspace pull request merged (see `12-cli-commands.md`).
 
 The integration lead works from unscoped main. Each delivery team works from a
 checkout stamped to one claimed Unit. A claimed checkout runs that Unit's exact
