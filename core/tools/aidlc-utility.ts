@@ -265,6 +265,7 @@ import {
   finishedWork,
   workStanding,
   listSpaces,
+  otherSpaceWithWorkLine,
   ARCHIVED_INTENT_STATUS,
   clearActiveIntentCursor,
   intentStartedByQuestion,
@@ -8879,7 +8880,7 @@ function printIntentListing(
   }
   if (intents.length === 0) {
     process.stdout.write(
-      `No intents in space "${space}" yet. Start one by describing what to build: ${entrySkillInvocation()} "build the auth service"\n`
+      `No intents in space "${space}" yet.${otherSpaceWithWorkLine(projectDir, space)} Start one by describing what to build: ${entrySkillInvocation()} "build the auth service"\n`
     );
     return;
   }
