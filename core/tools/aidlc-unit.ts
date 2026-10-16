@@ -1139,42 +1139,6 @@ function candidateReviewerReady(
   });
 }
 
-function validateCandidateUnitProgress(
-  state: string,
-  claim: UnitClaimView,
-  stages: string[],
-): void {
-  const heading = /^## Unit Progress\s*$/m.exec(state);
-  if (!heading) fail("Pinned candidate state has no Unit Progress projection.");
-  const after = heading.index + heading[0].length;
-  const next = /^## /m.exec(state.slice(after));
-  const section = state.slice(after, next ? after + next.index : state.length);
-  const rows = section
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("|"))
-    .map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()));
-  const header = rows.find((cells) => cells[0]?.toLowerCase() === "unit");
-  if (!header) fail("Pinned candidate Unit Progress projection has no header.");
-  const row = rows.find((cells) => cells[0] === claim.unit);
-  if (!row || row.length !== header.length) {
-    fail(`Pinned candidate Unit Progress has no valid row for "${claim.unit}".`);
-  }
-  const ownerIndex = header.findIndex((cell) => cell.toLowerCase() === "owner");
-  if (ownerIndex < 0 || row[ownerIndex] !== claim.owner) {
-    fail(`Pinned candidate Unit Progress owner does not match "${claim.owner}".`);
-  }
-  for (const stage of stages) {
-    const stageIndex = header.indexOf(stage);
-    if (stageIndex < 0 || row[stageIndex] !== "[x]") {
-      fail(`Pinned candidate Unit Progress stage "${stage}" is not complete.`);
-    }
-  }
-  const gateIndex = header.findIndex((cell) => cell.toLowerCase() === "gate");
-  if (gateIndex < 0 || row[gateIndex] !== "[x]") {
-    fail("Pinned candidate Unit Progress gate is not approved.");
-  }
-}
-
 function mainUnitRowMerged(
   projectDir: string,
   transaction: UnitMergeTransaction,
@@ -1546,7 +1510,9 @@ function candidateEvidence(
     true,
   );
   if (stages.length === 0) fail("Pinned candidate has no active per-unit Construction stages.");
-  validateCandidateUnitProgress(state, claim, stages);
+  // The Unit's row is derived from the candidate's receipts below, as the board
+  // and the fold derive it; the candidate's copy of aidlc-state.md is engine
+  // metadata a land discards, so it is not read.
   const graph = loadStageGraphAll();
   const baseState = stateAtOid(projectDir, candidateBaseOid);
   const baseStages = unitMajorConstructionStageSlugs(
@@ -1640,12 +1606,22 @@ function candidateEvidence(
     return (stage?.produces ?? []).length > 0 &&
       filterProducesByKind(stage?.produces_kinds, stage?.produces ?? [], unitKind).length === 0;
   }));
+  // The clone stamped each receipt with the run floor it read from the whole
+  // audit record (the workflow's own rows plus its own). Read the candidate's
+  // receipts against the same floor: this checkout's rows that are not Unit
+  // attempt rows, with the transported rows on top. Transported rows alone
+  // hold no WORKFLOW_STARTED, so every real receipt would miss the floor.
+  const floorRows = orderedAuditRows(projectDir).filter((row) =>
+    !TRANSPORTED_ATTEMPT_EVENTS.has(row.event) &&
+    !TRANSPORTED_DATA_EVENTS.has(row.event)
+  );
+  const snapshotRows = [...floorRows, ...authorityRows];
   const stagesCompleted = stages.filter((stage) =>
     notApplicable.has(stage) ||
     unitLifecycleSnapshot(
       projectDir,
       stage,
-      authorityRows,
+      snapshotRows,
       integrationState,
       {
         artifactFingerprint: (stageNode, unitName) =>
@@ -1764,8 +1740,12 @@ function candidateEvidence(
       approvalEvent &&
       auditBlockField(approvalEvent.block, "Details") ===
         (approvalEvent.event === "PLAN_APPROVAL_SKIPPED" ? "Plan approval off" : "Approve Plan") &&
-      auditBlockField(approvalEvent.block, "Checkpoint") ===
-        PLAN_APPROVAL_CHECKPOINT &&
+      // The engine's own plan question (aidlc-plan-approval-ask) stamps the
+      // checkpoint as "plan-approval"; the conductor-recorded answer
+      // (aidlc-log) stamps the long name. Both are the same approval.
+      [PLAN_APPROVAL_CHECKPOINT, "plan-approval"].includes(
+        auditBlockField(approvalEvent.block, "Checkpoint") ?? "",
+      ) &&
       auditBlockField(approvalEvent.block, "Plan Target") ===
         `unit:${claim.unit}` &&
       auditBlockField(approvalEvent.block, "Intent") ===
@@ -2430,15 +2410,13 @@ function conflictFiles(projectDir: string): string[] {
     : [];
 }
 
-function checkpointMainMetadata(
+// What the landing checkout's worktree holds beyond the engine's own merge
+// metadata: `unsafe` is anything a landing must not sweep up (a person's
+// uncommitted source, a stray audit file), `staged` what the checkpoint
+// commits.
+function landingWorktreePaths(
   projectDir: string,
-  message: string,
-): { parentOid: string; commitOid?: string } {
-  const parentOid = gitOutput(
-    projectDir,
-    ["rev-parse", "HEAD"],
-    "Cannot resolve metadata checkpoint parent",
-  );
+): { unsafe: string[]; staged: string[] } {
   const statusResult = git(
     projectDir,
     ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -2449,7 +2427,7 @@ function checkpointMainMetadata(
     );
   }
   const status = statusResult.stdout;
-  if (!status) return { parentOid };
+  if (!status) return { unsafe: [], staged: [] };
   const recordPrefix = relativeRecordDir(projectDir);
   if (!recordPrefix) {
     fail("Cannot resolve active intent metadata for Unit landing.");
@@ -2465,17 +2443,38 @@ function checkpointMainMetadata(
       paths.push(records[++i]);
     }
   }
-  const unsafe = paths.filter(
-    (path) =>
-      !isEngineMergeMetadata(projectDir, path, recordPrefix) &&
-      path !== `${recordPrefix}/audit/${auditShardName(projectDir)}`,
-  );
+  return {
+    unsafe: paths.filter(
+      (path) =>
+        !isEngineMergeMetadata(projectDir, path, recordPrefix) &&
+        path !== `${recordPrefix}/audit/${auditShardName(projectDir)}`,
+    ),
+    staged: paths,
+  };
+}
+
+function assertCleanSourceWorktree(projectDir: string): void {
+  const { unsafe } = landingWorktreePaths(projectDir);
   if (unsafe.length > 0) {
     fail(
       `Unit landing requires a clean source worktree; commit or stash: ${unsafe.join(", ")}.`,
     );
   }
-  const added = git(projectDir, ["add", "-A", "--", ...paths]);
+}
+
+function checkpointMainMetadata(
+  projectDir: string,
+  message: string,
+): { parentOid: string; commitOid?: string } {
+  const parentOid = gitOutput(
+    projectDir,
+    ["rev-parse", "HEAD"],
+    "Cannot resolve metadata checkpoint parent",
+  );
+  assertCleanSourceWorktree(projectDir);
+  const { staged } = landingWorktreePaths(projectDir);
+  if (staged.length === 0) return { parentOid };
+  const added = git(projectDir, ["add", "-A", "--", ...staged]);
   if (!added.ok) {
     fail(
       `Failed to stage main engine metadata checkpoint: ${added.stderr.trim() || added.stdout.trim()}.`,
@@ -3259,6 +3258,9 @@ function landUnit(args: string[], projectDir?: string): void {
       ["rev-parse", "HEAD"],
       "Cannot resolve local landing target",
     );
+    // A stray file in the landing checkout's audit directory would move the
+    // run floor the evidence is read against; name it as what it is first.
+    assertCleanSourceWorktree(pd);
     if (
       !git(
         pd,

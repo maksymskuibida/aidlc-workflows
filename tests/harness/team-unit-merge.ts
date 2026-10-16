@@ -349,13 +349,14 @@ export function auditBlock(
   generation: number,
   stage: string,
   extra = "",
+  runFloor = "unstarted#0",
 ): string {
   return `## ${event}
 **Timestamp**: 2026-08-20T01:00:00Z
 **Event**: ${event}
 **Stage**: ${stage}
 **Unit**: ${unit}
-**Run floor**: unstarted#0
+**Run floor**: ${runFloor}
 **Attempt Generation**: ${generation}
 ${extra}
 ---
@@ -520,6 +521,16 @@ export function prepareCandidate(
      *  written - lets a case mint a real event (e.g. a session-start hook)
      *  into the fresh checkout's shard before anything else exists there. */
     afterClaim?: (checkout: string) => void;
+    /** The run floor every receipt carries, as a clone that read the whole
+     *  audit record (main's rows included) would stamp it. The default is the
+     *  floor of a record with no WORKFLOW_STARTED row. */
+    runFloor?: string;
+    /** The Plan Approval row's Checkpoint field; the engine's own plan
+     *  question stamps `plan-approval`, the conductor's recorder the long name. */
+    checkpoint?: string;
+    /** Leave the Unit's row of the candidate's aidlc-state.md as main had it
+     *  instead of marking it complete: the row is derived from receipts. */
+    keepRow?: boolean;
   } = {},
 ): {
   checkout: string;
@@ -555,10 +566,12 @@ export function prepareCandidate(
   ];
   if (/^\| unit \|.*\| merged \|$/m.test(state)) rowCells.push("");
   const row = `| ${rowCells.join(" | ")} |`;
-  state = state.replace(
-    new RegExp(`^\\| ${unit} \\|.*$`, "m"),
-    row,
-  );
+  if (!options.keepRow) {
+    state = state.replace(
+      new RegExp(`^\\| ${unit} \\|.*$`, "m"),
+      row,
+    );
+  }
   if (options.mergeHeld) {
     state = state.replace(
       "## Project Information",
@@ -603,7 +616,7 @@ export function prepareCandidate(
     directiveEpoch: `sha256:${createHash("sha256")
       .update(`directive:${unit}:${generation}`)
       .digest("hex")}`,
-    runFloor: "unstarted#0",
+    runFloor: options.runFloor ?? "unstarted#0",
     sourceFloor: `sha256:${createHash("sha256")
       .update(`source:${unit}:${generation}`)
       .digest("hex")}`,
@@ -632,6 +645,7 @@ export function prepareCandidate(
     writeFileSync(join(srcDir, "shared.ts"), options.sharedText);
   }
 
+  const floor = options.runFloor ?? "unstarted#0";
   let audit = "";
   for (const stage of stages) {
     const stageNode = graph.find((entry) => entry.slug === stage);
@@ -651,6 +665,7 @@ export function prepareCandidate(
       generation,
       stage,
       lifecycleExtra,
+      floor,
     );
     if (stage === "code-generation") {
       const promptSha256 = createHash("sha256")
@@ -667,7 +682,7 @@ export function prepareCandidate(
         generation,
         stage,
         `**Details**: Approve Plan\n` +
-          `**Checkpoint**: Code Generation Plan Approval\n` +
+          `**Checkpoint**: ${options.checkpoint ?? "Code Generation Plan Approval"}\n` +
           `**Plan Target**: unit:${unit}\n` +
           `**Intent**: ${intentUuid}\n` +
           `**Directive Epoch**: ${authority.directiveEpoch}\n` +
@@ -676,6 +691,7 @@ export function prepareCandidate(
           `**Questions SHA-256**: ${createHash("sha256").update(questions, "utf-8").digest("hex")}\n` +
           `**Prompt SHA-256**: ${promptSha256}\n` +
           `**Session**: ${label}-session\n`,
+        floor,
       );
     }
     if (stageNode?.reviewer) {
@@ -699,6 +715,7 @@ export function prepareCandidate(
         generation,
         stage,
         review.request,
+        floor,
       );
       audit += auditBlock(
         "REVIEW_COMPLETED",
@@ -706,6 +723,7 @@ export function prepareCandidate(
         generation,
         stage,
         review.completion,
+        floor,
       );
     }
     audit += auditBlock(
@@ -714,6 +732,7 @@ export function prepareCandidate(
       generation,
       stage,
       `**Gate Scope**: per-stage\n**Gate Stages**: ${stage}\n**User Input**: Approve\n`,
+      floor,
     );
   }
   const auditShard = auditShardName(checkout);
