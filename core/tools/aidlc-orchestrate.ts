@@ -312,7 +312,6 @@ import {
   unitsRepoChangeAcceptance,
   unitsRepoChangeQuestion,
   unitsReposAskPassedOver,
-  teamsAcrossReposLine,
   isRefusedModifierNextArgv,
   isRetiredOnlyNextArgv,
   isRegularFile,
@@ -584,6 +583,7 @@ import { resolveSwarmCheckpoint } from "./aidlc-swarm-checkpoints.ts";
 import {
   cachedUnitClaimOverview,
   localUnitClaimOverviewForIntent,
+  unitLandsThroughPullRequests,
   type UnitClaimOverview,
   type UnitClaimView,
 } from "./aidlc-unit.ts";
@@ -5097,11 +5097,6 @@ function constructionStaffingAsk(
     return null;
   }
   const order = readConstructionIteration(stateContent) === "unit-major" ? "one after another" : "stage by stage";
-  const repos = intentRepos(projectDir);
-  if (repos.length > 0) {
-    if (speaks) sayWithStepOnce(projectDir, teamsAcrossReposLine(repos.length, units));
-    return null;
-  }
   if (constructionStaffingPassedOver(projectDir)) {
     if (speaks) {
       sayWithStepOnce(
@@ -5517,7 +5512,7 @@ function initialUnitProgressSection(
         stages.map(() => "[ ]").join(" | ")
       } | [ ] |${
         mergeTracking
-          ? ` ${transaction?.status === "complete" ? "[x]" : "[ ]"} |`
+          ? ` ${transaction?.status === "complete" || transaction?.status === "finished" ? "[x]" : "[ ]"} |`
           : ""
       }`;
     }),
@@ -5611,7 +5606,7 @@ function assembleTeamConstructionBoard(
       ...(checkouts.has(claim.unit) ? { checkout: checkouts.get(claim.unit)! } : {}),
     }));
   const awaitingMerge = transactions
-    .filter((transaction) => transaction.status !== "complete")
+    .filter((transaction) => transaction.status !== "complete" && transaction.status !== "finished")
     .sort((a, b) => compareBoardKeys(a.unit, b.unit))
     .map((transaction) => ({
       unit: transaction.unit,
@@ -15762,15 +15757,7 @@ function emitTeamUnitMajorRunStage(
   if (scopeStamp) {
     // Named, so the step on record says which Unit is done here: the notice
     // is that step on every harness, and the plan-approval guard reads it.
-    emit({
-      ...noticeDirective(
-        `Unit "${scopeStamp.unit}" is complete and approved in this checkout. ` +
-          `Commit the completed candidate and run \`aidlc unit publish ${scopeStamp.unit}\` here; then pin, ` +
-          "gate and land it from a checkout of this project that holds no Unit claim (a fresh clone of it). " +
-          "Once it lands, pull main here and this checkout is free again.",
-      ),
-      unit: scopeStamp.unit,
-    });
+    emit({ ...noticeDirective(unitApprovedNotice(projectDir, scopeStamp.unit)), unit: scopeStamp.unit });
     return;
   }
   const next = nextInScopeStage(finalStage.slug, scope, refreshedState);
@@ -15937,6 +15924,34 @@ function teamUnitMajorWalkBeat(
     effectiveUnitGateRhythm(projectDir, stateContent), auditRows, recordPrefix, codekbCtx,
   );
   return { step, block, context: { units, kinds: resolution.unitKinds, recordPrefix, codekbCtx } };
+}
+
+// What a scoped checkout does once its Unit is approved. The landing strategy
+// is the dispatch's answer, not a setting, so before any pull request is
+// recorded the notice names both paths; once `unit pr` recorded one, the Unit
+// lands through pull requests and only that path is named.
+function unitApprovedNotice(projectDir: string, unit: string): string {
+  const prPath =
+    "this checkout closes it, in this order: " +
+    `\`aidlc unit pr ${unit} --repo <name>\` from each code repository's pushed branch, ` +
+    "and those pull requests merged; " +
+    `\`aidlc unit pin ${unit}\`, whose \`merge_gate\` is the person's question and the command for each answer; ` +
+    `\`aidlc unit land ${unit}\` and a push of this branch; \`aidlc unit pr ${unit}\` for this branch; ` +
+    `once that pull request is merged, \`aidlc unit finish ${unit}\`. ` +
+    "Nothing runs from the unscoped main checkout.";
+  const head =
+    `Unit "${unit}" is complete and approved in this checkout. ` +
+    "Commit everything this checkout changed, the Unit's record with the state and audit changes the engine just wrote, " +
+    `then run \`aidlc unit publish ${unit}\`. `;
+  if (unitLandsThroughPullRequests(projectDir, unit)) {
+    return head + `This Unit lands through pull requests (strategy pr): ${prPath}`;
+  }
+  return (
+    head +
+    "Where main takes merges, pin, gate and land it from a checkout of this project that holds no Unit claim " +
+    "(a fresh clone of it); once it lands, pull main here and this checkout is free again. " +
+    `Where main takes only pull requests (strategy pr), ${prPath}`
+  );
 }
 
 // The first stop of the solo unit-major walk, without emitting it. Units walk

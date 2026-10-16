@@ -340,6 +340,44 @@ The answer counts when a typed human turn follows the pin. The transaction
 lands with strategy `merge` into the pin's integration branch, so the reviewed
 pinned OID remains a direct parent; that is not a choice for the person, and the
 team's merge default holds for every other merge.
+
+**Pull-request landing (strategy `pr`).** Where `main` takes only reviewed
+pull requests, the Unit is closed from the checkout or worktree that built it,
+and pin there gives its gate strategy `pr` with the Unit's own branch as target:
+the code's pull request(s) in the code repositories, opened with `aidlc unit
+pr <unit> --repo <name>` from each repository's pushed branch (title
+the Unit's title or `--title`, body that repository's own pull request
+template or `--body-file`, which carry a team's own conventions, or only the
+`## AI-DLC Unit` section where it has none, when
+pr's output carries a `notice` to say once), are reviewed and merged first; then, on the Unit's branch, `aidlc
+unit pin <unit>`, whose `merge_gate` is the one question, about opening the
+workspace pull request: ask it as given, write the person's reply to its
+request file and record it with the command it names for their choice (the
+gate takes the code pull requests `pr` recorded, or `--pr
+<owner>/<repo>#<n>[,...]`; each is read from GitHub and must be merged, and
+approved when the project requires it with `aidlc config flags
+--pull-request-approval on`; the gate row records the reviewers it finds, the
+head and merge commits), and
+`aidlc unit land <unit>`. Land verifies each pull request's merge commit and
+content on that repository's integration branch, folds the Unit row and
+`UNIT_MERGED` into this branch, and commits; `aidlc unit pr <unit>` then opens
+the branch's own pull request, which carries the record and the fold to
+`main`. `main` moving before land: commit what the gate wrote, bring `main`
+into the branch, and run `aidlc unit land <unit>` again; the approved pin
+still lands it, and only when land answers that the integration evidence
+changed do you publish, pin and gate again. Moving after land, while the pull request is open, means
+rebase and `aidlc unit land <unit> --refold`, which re-runs the fold on the
+rebased branch. Pull requests may be opened from the Unit's branch only, never
+from the claim ref. Once the pull request is merged, `aidlc unit finish <unit>`
+in the same checkout verifies that `main` carries exactly the head land left
+behind, deletes the Unit's claim ref, ends the checkout's scope, and either returns a main checkout to the
+integration branch (then `next` picks the next Unit) or hands a worktree the
+one command that removes it. Content merged after land is refused until a
+person inspects it and accepts it with `--accept-merged-drift --user-input
+'<text>'`, which records `UNIT_MERGE_DRIFT_ACCEPTED` and opens a record-only
+follow-up pull request for that row. A claim from a checkout still scoped to a
+merged Unit is refused until that Unit is finished.
+
 The candidate may transport one claim-bound new audit shard containing that
 team's own attempt-keyed lifecycle, team-gate, and reviewer receipts. These are
 team assertions rechecked against artifacts/fingerprints and judged at the main

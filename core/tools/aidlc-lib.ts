@@ -1155,6 +1155,7 @@ const PROJECT_FLAG_FIELDS: Record<string, keyof ProjectFlagsRecord> = {
   AWS_AIDLC_DEFAULT_SCOPE: "defaultScope",
   AIDLC_USE_SWARM: "swarm",
   AIDLC_HOOK_DEBUG: "hookDebug",
+  AIDLC_PR_REQUIRE_APPROVAL: "pullRequestApproval",
   AIDLC_SENSOR_TIMEOUT_MS: "sensorTimeoutMs",
   AIDLC_QUESTION_RETENTION_DAYS: "questionRetentionDays",
 };
@@ -27619,16 +27620,6 @@ export function clearUnitsReposAsked(projectDir: string): void {
   clearEngineAskMark(projectDir, UNITS_REPOS_ASK);
 }
 
-// Teams each owning a Unit need the code in this project's own repo, so work
-// with recorded repos is built by one session for now. What the person hears,
-// from the engine as Construction starts and from the ownership setter alike.
-export function teamsAcrossReposLine(repoCount: number, unitCount?: number): string {
-  const where = repoCount === 1 ? "This work's code is in a repo of its own" : `This work spans ${repoCount} repos`;
-  const units = unitCount === undefined ? "its Units" : `its ${unitCount} Units`;
-  return `${where}, so this session builds ${units}: teams each owning a Unit is not available yet for ` +
-    "work across repos.";
-}
-
 /** Recovery operates exactly where the framework recorded parking this slug;
  * records never widen to other slugs; unrecorded discovery requires a real child.
  * Intent membership alone does not authorize recovery through a repository symlink.
@@ -29564,7 +29555,8 @@ export interface UnitMergeTransaction {
     | "rejected"
     | "git-landed"
     | "state-folded"
-    | "complete";
+    | "complete"
+    | "finished";
   space: string;
   intent_uuid: string;
   intent_id8: string;
@@ -29586,11 +29578,30 @@ export interface UnitMergeTransaction {
   decision?: string;
   user_input?: string;
   target_branch?: string;
-  strategy?: "merge";
+  strategy?: "merge" | "pr";
+  // Pull-request landing: the references the gate recorded, and the head
+  // commit of each code repository's branch whose content land verifies on
+  // that repository's integration branch.
+  pull_requests?: Array<{
+    ref: string;
+    url: string;
+    repo: string;
+    head: string;
+    merge_commit: string;
+    merged_at: string;
+    approvers: string[];
+  }>;
   live_stage_columns?: string[];
   checkpoint_parent_oid?: string;
   checkpoint_commit_oid?: string;
   git_commit_oid?: string;
+  // Pull-request landing: the branch head land left behind (fold and
+  // checkpoint included), which finish compares with what the pull request
+  // merged; and finish's own record.
+  landed_head_oid?: string;
+  finished_at?: string;
+  merge_commit_oid?: string;
+  merge_drift?: string[];
   conflict_files?: string[];
   released_after_git?: {
     accepted_at: string;
@@ -29708,6 +29719,7 @@ export function readUnitMergeTransaction(
         "git-landed",
         "state-folded",
         "complete",
+        "finished",
       ].includes(parsed.status) ||
       typeof parsed.space !== "string" ||
       parsed.space !== resolvedSpace ||

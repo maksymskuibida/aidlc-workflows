@@ -336,7 +336,8 @@ export function clone(remote: string, label: string): string {
   git(dir, ["config", "user.name", label]);
   git(dir, ["config", "user.email", `${label}@example.test`]);
   // The selection is the person's own and stays out of git: in a new clone
-  // they pick the work once.
+  // they pick the work once. A code repository's clone holds no workspace.
+  if (!existsSync(join(dir, "aidlc"))) return dir;
   writeFileSync(join(dir, "aidlc", "active-space"), `${DEFAULT_SPACE}\n`);
   writeFileSync(join(intentsDirOf(dir), "active-intent"), `${DEFAULT_RECORD_DIR}\n`);
   return dir;
@@ -533,6 +534,9 @@ export function prepareCandidate(
     /** Runs after the Unit's commit, right before publish: what a session
      *  writes into the checkout between the two. */
     beforePublish?: (checkout: string) => void;
+    /** After the claim, build on this new branch instead of the clone's
+     *  checked-out one: the branch a pull request is opened from. */
+    branch?: string;
     /** Leave the work committed in the checkout and do not publish it. */
     publish?: boolean;
     /** Runs once the stage documents and receipts are written, before the
@@ -561,6 +565,7 @@ export function prepareCandidate(
     checkout,
   );
   expect(claim.status, claim.out).toBe(0);
+  if (options.branch) git(checkout, ["switch", "-c", options.branch]);
   options.afterClaim?.(checkout);
   const claimPayload = JSON.parse(claim.stdout);
   const generation = claimPayload.generation as number;
