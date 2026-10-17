@@ -21050,16 +21050,20 @@ export function freshReviewReceipts(
       if (!rejectedUnit || !gateStagesFromBlock(e.block).includes(stage.slug)) {
         continue;
       }
+      // The person's Request Changes opens a new attempt for the Unit: its one
+      // stale-receipt recovery review is available again, for the Unit and for
+      // the source it bound, or a second revision could never get its review.
       if (unitVerdicts.delete(rejectedUnit)) {
         unitStale.add(rejectedUnit);
         unitStaleProgress.set(rejectedUnit, {
           nextIteration: (unitIterations.get(rejectedUnit) ?? 0) + 1,
-          recoverySpent: unitReceiptRecovery.get(rejectedUnit) ?? false,
+          recoverySpent: false,
         });
       }
       unitIterations.delete(rejectedUnit);
       unitReceiptRecovery.delete(rejectedUnit);
       unitPending.delete(rejectedUnit);
+      if (newestSourceUnit === rejectedUnit) sourceRecoverySpent = false;
       for (const [key, request] of pendingRequests) {
         if (request.unit === rejectedUnit) pendingRequests.delete(key);
       }
@@ -32316,6 +32320,27 @@ function lifecycleResetRemedies(
     ];
   }
   if (state === "revising") {
+    // The gate still needs this Unit's UNIT_COMPLETED receipt after Request
+    // Changes: finishing the revision asks for it again, and a stage restart is
+    // refused in a Unit-scoped checkout, so recording it is offered here too.
+    // The person's pick lets `unit complete` record it without a start (#1289).
+    const completionFirst: GuardRemedy[] = [];
+    if (input.code === "UNIT_COMPLETION_MISSING" && input.unit) {
+      const operation = guardOperation({
+        kind: "record-unit-completion",
+        stage: input.stage,
+        unit: input.unit,
+      });
+      completionFirst.push({
+        op: "record-unit-completion",
+        action:
+          `Record Unit "${input.unit}"'s completion for "${input.stage}" from the artifacts ` +
+          `already on disk by running \`${operation.command}\`, then finish the revision.`,
+        ...operation,
+        requiresHuman: true,
+        executableNow: true,
+      });
+    }
     const finishRevisionCommand = renderEngineInvocation({
       route: "orchestrate",
       args: [
@@ -32330,6 +32355,7 @@ function lifecycleResetRemedies(
       ],
     }, { harnessDir: harnessDir() });
     return [
+      ...completionFirst,
       {
         op: "finish-revision",
         action:
@@ -32539,6 +32565,8 @@ export function evaluateGuardRefusal(
       });
     }
     if (input.attempt.nextReview) {
+      // A revision's own review is the way to a finishable revision, so the
+      // request stays executable while the stage is being revised.
       remedies.push({
         op: "request-review",
         action: reviewRequestAction(
@@ -32547,7 +32575,7 @@ export function evaluateGuardRefusal(
           input.attempt.nextReview.request,
         ),
         requiresHuman: false,
-        executableNow: input.attempt.summaryCoverage === "current" && openForWork,
+        executableNow: input.attempt.summaryCoverage === "current" && (openForWork || state === "revising"),
       });
     }
     if (
@@ -32641,7 +32669,8 @@ export function evaluateGuardRefusal(
           input.attempt.requestReview,
         ),
         requiresHuman: false,
-        executableNow: input.attempt.summaryCoverage === "current" && openForWork,
+        // A revision's own review is the way to a finishable revision.
+        executableNow: input.attempt.summaryCoverage === "current" && (openForWork || state === "revising"),
       });
     } else if (
       reviewBudgetAvailable &&
@@ -32657,7 +32686,7 @@ export function evaluateGuardRefusal(
           input.attempt.requestReview,
         ),
         requiresHuman: false,
-        executableNow: input.attempt.summaryCoverage === "current" && openForWork,
+        executableNow: input.attempt.summaryCoverage === "current" && (openForWork || state === "revising"),
       });
     }
     if (
