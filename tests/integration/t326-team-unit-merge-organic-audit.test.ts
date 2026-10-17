@@ -8,6 +8,7 @@ import { join, relative } from "node:path";
 import { readUnitScopeStamp, writeSessionPidEntry } from "../../dist/claude/.claude/tools/aidlc-lib.ts";
 import { AIDLC_SRC, seededAuditDir } from "../harness/fixtures.ts";
 import {
+  auditBlock,
   UNIT,
   appendMainHumanTurn,
   cleanupTempDirs,
@@ -179,6 +180,12 @@ function answerStorageQuestion(checkout: string): void {
   // `aidlc log` touches the engine's turn marker, which the shipped .gitignore
   // ignores and the seed's does not.
   appendFileSync(join(checkout, ".git", "info", "exclude"), "**/.aidlc-engine/engine-touch\n");
+  // A team Unit's records hang off its start, recorded as the walk's first step.
+  const stamp = readUnitScopeStamp(checkout)!;
+  appendFileSync(
+    join(seededAuditDir(checkout), stamp.audit_shard!),
+    auditBlock("UNIT_STARTED", "alpha", stamp.generation, "functional-design"),
+  );
   appendMainHumanTurn(checkout);
   const asked = runMergeTool(LOG, [
     "decision", "--stage", "functional-design", "--unit", "alpha",
