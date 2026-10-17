@@ -324,6 +324,8 @@ export interface RunStageDirective {
   // Beside an unresolved gate, a verification command awaiting approval, or a
   // Unit's step with no gate of its own: the agent's next move without a skill.
   gate_note?: string;
+  /** UNIT_STEPS_NOTE, on a per-Unit body directive: the Unit's steps in order, the start first. */
+  unit_steps_note?: string;
   // protocolNote(): the protocol files this step runs by, for a chat with no skill.
   protocol_note?: string;
   // The branches the skill rows used to make on a field, made here and handed
@@ -1014,6 +1016,7 @@ const RUN_STAGE_FIELDS = [
   "parked_reply",
   "gate",
   "gate_note",
+  "unit_steps_note",
   "protocol_note",
   "answer_mode_note",
   "context_note",
@@ -1761,6 +1764,23 @@ export function bodyRuns(d: Record<string, unknown>): boolean {
 // The notes for one emitted directive. `invocation` is how this install runs
 // the orchestrate tool. A rules part carries none: its run-stage repeats the
 // advisory and the notices, and they are said from there, once.
+// One Unit's pass through a per-Unit stage, in the order the engine's receipts
+// expect it. Said on every per-Unit body directive, because the start is the
+// step that was skipped in live runs and every later record hangs off it.
+export function unitStepsNote(stateInvocation: string, stage: string, unit: string, reviewed: boolean): string {
+  return `This is one Unit's pass, in this order: ` +
+    `(1) \`${stateInvocation} unit start --stage ${stage} --unit ${unit}\` before any question, record or file; ` +
+    "(2) the stage's questions and, when asked, the summary confirmation" +
+    (stage === "code-generation" ? " and the plan approval" : "") + "; " +
+    "(3) its documents or code; " +
+    (reviewed ? "(4) its review, requested and recorded; " : "") +
+    `(${reviewed ? 5 : 4}) \`${stateInvocation} unit complete --stage ${stage} --unit ${unit}\`; ` +
+    `(${reviewed ? 6 : 5}) \`next\`, which presents the approval. ` +
+    "Request changes only at that approval, never at a recovery question: a rejection before the gate exists " +
+    `opens an attempt that owes the start${reviewed ? ", the review" : ""}` +
+    (stage === "code-generation" ? " and the plan approval" : "") + " again.";
+}
+
 // `changeNoticesFollowUps` are the agent's own sentences for lines this
 // directive carries (the command a yes to a switch line runs), after
 // CHANGE_NOTICES_NOTE, so they never ride in a line the person hears.
@@ -1780,6 +1800,13 @@ export function withAgentNotes<T extends object>(
   }
   if (Array.isArray(d.change_notices) && d.change_notices.length > 0) {
     notes.change_notices_note = [CHANGE_NOTICES_NOTE, ...new Set(changeNoticesFollowUps)].join(" ");
+  }
+  if (
+    d.kind === "run-stage" && typeof d.unit === "string" && d.gate === false &&
+    d.wave === undefined && d.construction_checkpoint === undefined && d.swarm_checkpoint === undefined
+  ) {
+    const stateInvocation = invocation.replace(/aidlc-orchestrate\.ts$/, "aidlc-state.ts").replace(/ orchestrate$/, " state");
+    notes.unit_steps_note = unitStepsNote(stateInvocation, String(d.stage), d.unit, d.reviewer !== undefined);
   }
   if (d.kind === "ask" && d.agent_work !== true) {
     if (!Array.isArray(d.choices)) {
@@ -1935,6 +1962,7 @@ export function validateDirective(obj: unknown): ValidationResult {
   checkAgentNote(o, "estimate_note", "repo_facts" in o, kind, errors);
   checkAgentNote(o, "document_note", true, kind, errors);
   checkAgentNote(o, "gate_note", true, kind, errors);
+  checkAgentNote(o, "unit_steps_note", true, kind, errors);
   checkAgentNote(o, "protocol_note", true, kind, errors);
   checkAgentNote(o, "construction_policy_note", true, kind, errors);
   checkAgentNote(o, "answer_mode_note", "stage_file" in o, kind, errors);
