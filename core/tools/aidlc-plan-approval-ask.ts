@@ -813,6 +813,21 @@ function targetState(
 
 // In place: the engine keys a run-stage's rule route and a swarm's publication
 // context by the directive object itself.
+/**
+ * True when this Unit's plan approval covers the attempt the directive runs in
+ * (or plan approval is off for it): the gate beat for a Unit built in this
+ * attempt may then be marked settled. A completion recorded in a new attempt
+ * without a rebuild (a revision that changed nothing on disk) leaves the
+ * approval behind the attempt, and the plan is asked about again before the
+ * gate, as the plan-approval guard requires.
+ */
+export function planApprovalCoversAttempt(projectDir: string, unit: string, issued: CodeGenerationIssuance): boolean {
+  const intentId = intentIdFor(projectDir);
+  const record = readPlanApprovalAsk(projectDir, intentId);
+  const kind = targetState(projectDir, unit, intentId, record, issued, planApprovalSettingFor(projectDir)?.value === "off").kind;
+  return kind === "approved" || kind === "skip";
+}
+
 function withPlanState<T extends RunStageDirective | InvokeSwarmDirective>(
   directive: T,
   state: CodeGenerationPlanApprovalState,
