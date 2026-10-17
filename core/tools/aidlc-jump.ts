@@ -10,7 +10,9 @@ import { stageLabel } from "./aidlc-validity.ts";
 import {
   addPendingPersonLines,
   type CheckboxState,
+  claimAttemptFields,
   countCheckboxes,
+  effectiveUnitGateRhythm,
   emitError,
   errorMessage,
   extractMarkdownSection,
@@ -18,6 +20,7 @@ import {
   firstInScopeStageOfPhase,
   getField,
   isPerUnitStage,
+  isTeamUnitOwnership,
   isoTimestamp,
   loadScopeMapping,
   loadStageGraph,
@@ -268,12 +271,24 @@ function handleReopen(args: string[]): void {
   const changeWords = flags.via === "change"
     ? personsGateFeedback(pd, resolveInvokingSessionId(pd), { stage: gateStage })
     : null;
+  // The rows carry the scope the Units' gates are read under: a team-owned
+  // Unit on the per-stage rhythm has a gate at every step, and a unit-end row
+  // would leave each reopened step approved there, with no gate to ask again.
+  const gateScope = isTeamUnitOwnership(content) &&
+      effectiveUnitGateRhythm(pd, content) === "per-stage"
+    ? "per-stage"
+    : "unit-end";
   for (const unit of units) {
+    // A scoped checkout reads its own Unit's rows by the claim's attempt
+    // generation; a reopen without it would be invisible to the receipt
+    // accounting there, and the stage would stay approved.
+    const claim = claimAttemptFields(pd, unit);
     emitAudit(pd, "GATE_REJECTED", {
       Stage: targetSlug,
       "Gate Stages": stages.join(", "),
-      "Gate Scope": "unit-end",
+      "Gate Scope": gateScope,
       Unit: unit,
+      ...claim,
       // Marks the row as the person's redo or jump, or the change they asked
       // for at the gate.
       Reopen: flags.via ?? "jump",
@@ -293,6 +308,7 @@ function handleReopen(args: string[]): void {
         Artifacts: `construction/${unit}/${targetSlug}/`,
         Unit: unit,
         Source: REDO_REUSE_SOURCE,
+        ...claim,
       });
     }
   }
