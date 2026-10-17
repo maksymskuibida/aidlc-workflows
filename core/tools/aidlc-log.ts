@@ -107,7 +107,10 @@ import {
   isReplyTurn,
   isAutonomousConstructionDecision,
   legacyReviewAppendixEchoFields,
+  guardRecoveryAskOpenFor,
+  isTeamUnitOwnership,
   isAutonomousSwarmStage,
+  unitLifecycleRecorded,
   loadStageGraphAll,
   isNonAnswer,
   ANSWER_MODE_LABELS,
@@ -253,7 +256,12 @@ import {
   recordPlanApprovalOverrideReceipt,
   recordPlanApprovalReceipt,
 } from "./aidlc-testing-posture.js";
-import { aidlcDispatcherInvocation, entrySkillInvocation, swarmUnitTestCommand } from "./aidlc-runtime-paths.ts";
+import {
+  aidlcDispatcherInvocation,
+  aidlcToolInvocation,
+  entrySkillInvocation,
+  swarmUnitTestCommand,
+} from "./aidlc-runtime-paths.ts";
 import {
   APPROVAL_GATE_CHOICES,
   SUMMARY_CONFIRMATION_CHOICES,
@@ -1180,6 +1188,9 @@ function handleDecision(args: string[]): void {
     return;
   }
   if (flags.unit) validateLiveUnitScope(pd, flags.unit);
+  if (flags.unit) {
+    refuseWithoutUnitStart(pd, flags.stage, flags.unit, flags.single === "true", "record this question", error);
+  }
   const summaryEvidence =
     flags.checkpoint === "summary-confirmation"
       ? summaryQuestionEvidence(pd, flags, "")
@@ -1955,6 +1966,11 @@ function handleAnswer(args: string[]): void {
   // The engine's recovery question: the conductor records the remedy the
   // person picked, as it read their reply. "Request Changes: <what>" says the
   // same reply also said what should change.
+  if (flags.unit && flags.checkpoint !== "guard-recovery") {
+    refuseWithoutUnitStart(
+      resolveActiveProjectDir(projectDir), flags.stage, flags.unit, flags.single === "true", "record this answer", error,
+    );
+  }
   if (flags.checkpoint === "guard-recovery") {
     const pd = resolveActiveProjectDir(projectDir);
     let picked: { op: string; action: string; awaitingWords: boolean; stage: string; unit?: string };
@@ -2115,6 +2131,9 @@ function handleAnswer(args: string[]): void {
   const verificationCommand = verificationCheckpoint
     ? verificationCommandFromFlags(pd, flags) : null;
   if (flags.unit) validateLiveUnitScope(pd, flags.unit);
+  if (flags.unit) {
+    refuseWithoutUnitStart(pd, flags.stage, flags.unit, flags.single === "true", "record these answers", error);
+  }
   const summaryEvidence = summaryCheckpoint
     ? summaryQuestionEvidence(pd, flags, flags.details)
     : null;
@@ -2297,6 +2316,9 @@ function handleAnswer(args: string[]): void {
         stageNode !== undefined &&
         isPerUnitStage(stageNode) &&
         getField(content ?? "", "Construction Iteration")?.trim() === "unit-major";
+      if (flags.unit !== undefined) {
+        refuseWithoutUnitStart(pd, flags.stage, flags.unit, flags.single === "true", "record the summary choice", error);
+      }
       const auditRows = readAuditShardEvents(pd);
       const floors = summaryAttemptFloors(
         auditRows.filter((entry) => SUMMARY_EVIDENCE_EVENTS.has(entry.event)),
@@ -3026,6 +3048,41 @@ function refuseReview(message: string): never {
   throw new ReviewRefusal(message);
 }
 
+// A per-Unit stage's records hang off the Unit's start receipt: a question, a
+// summary confirmation or a review recorded for a Unit never started leaves a
+// gate that can only refuse the Unit later (UNIT_COMPLETION_MISSING), so the
+// missing start is named at the first record instead. It guards team-owned
+// Units only: a scoped checkout's gate is the one that cannot recover from the
+// missing receipt, and the solo walk's own recovery reviews (a hand edit of an
+// approved Unit's document, a redo) are requested before any new start. The
+// guard also stands aside for a single-stage run, an autonomous swarm Unit,
+// and while a guard refusal about the Unit still stands (its remedies are then
+// the way on).
+function refuseWithoutUnitStart(
+  pd: string,
+  stage: string,
+  unit: string,
+  single: boolean,
+  what: string,
+  refuse: (message: string) => never,
+): void {
+  if (single) return;
+  const node = loadStageGraphAll().find((entry) => entry.slug === stage);
+  if (!node || !isPerUnitStage(node)) return;
+  const state = existsSync(stateFilePath(pd)) ? readFileSync(stateFilePath(pd), "utf-8") : "";
+  if (!isTeamUnitOwnership(state)) return;
+  if (isAutonomousSwarmStage(pd, state, node)) return;
+  if (unitLifecycleRecorded(pd, stage, unit) || guardRecoveryAskOpenFor(pd, state, stage, unit)) return;
+  // The plan question comes before the start can be recorded (no run-stage is
+  // routed while it is open), so its answer is never what the guard refuses.
+  if (stage === "code-generation" && planApprovalAsk().planApprovalQuestionOpenFor(pd, unit)) return;
+  refuse(
+    `Cannot ${what} for "${stage}" Unit "${unit}": the Unit has not been started for this stage, ` +
+      "so nothing can be recorded against it. Run " +
+      `\`${aidlcToolInvocation("state")} unit start --stage ${stage} --unit ${unit}\` first, then ${what} again.`,
+  );
+}
+
 function refuseReviewGuard(
   projectDir: string,
   refusal: GuardRefusal,
@@ -3614,6 +3671,9 @@ function handleReview(args: string[]): void {
           unitResolution,
           mergedBoltUnits,
         } = context;
+        if (flags.unit !== undefined && !autonomousCandidate) {
+          refuseWithoutUnitStart(pd, flags.stage, flags.unit, flags.single === "true", "request a review", refuseReview);
+        }
         const { pendingStatus, teamGate } = admitReviewSummary(context, "review-request", requestChangeNotices);
         const expected = attempt.requestCount + 1;
         const sameSourceRecoveryScope =
