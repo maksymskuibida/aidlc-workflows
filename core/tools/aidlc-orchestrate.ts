@@ -648,6 +648,7 @@ import {
   preparePlanRecordFolders,
   publishPlanApprovalAsk,
   publishPlanApprovalSkip,
+  planApprovalCoversAttempt,
   routeCodeGenerationPlanApproval,
   settleBuiltPlanReviews,
   withBuiltPlanReviews,
@@ -11129,12 +11130,27 @@ function routeNext(agentArgs: string[], projectDir: string | undefined): void {
       ? readApplicableTeamUnitScopeStamp(pd, stateContent)
       : null;
 
+  // A scoped checkout reopens its own Unit's per-Unit steps, the way any
+  // checkout reopens an Inception stage: `--stage <slug>` here means
+  // `--stage <slug> --unit <this Unit>`, with every later per-Unit step. A
+  // phase jump, `--every-unit` or another Unit's step is main's to make.
   if (unitScope && (flags.stage || flags.phase)) {
-    emit(errorDirective(
-      `This checkout is scoped to Unit "${unitScope.unit}"; explicit stage/phase jumps are refused in a scoped Unit checkout. ` +
-        `Run \`${entrySkillInvocation()}\` here to carry on with Unit "${unitScope.unit}", or make the jump from the project's main checkout.`,
-    ));
-    return;
+    const targetStage = flags.stage ? findStageBySlug(flags.stage) : null;
+    const ownUnitStep =
+      targetStage !== null &&
+      targetStage !== undefined &&
+      isPerUnitStage(targetStage) &&
+      !flags.everyUnit &&
+      (flags.jumpUnit === undefined || flags.jumpUnit === unitScope.unit);
+    if (!ownUnitStep) {
+      emit(errorDirective(
+        `This checkout is scoped to Unit "${unitScope.unit}"; it reopens only that Unit's own per-Unit steps: ` +
+          `\`${entrySkillInvocation()} --stage <slug>\` here reopens the step and every later one for Unit "${unitScope.unit}". ` +
+          `A phase jump, --every-unit, another Unit's step or a stage that is not per-Unit is made from the project's main checkout.`,
+      ));
+      return;
+    }
+    flags.jumpUnit = unitScope.unit;
   }
 
   if (
@@ -14367,8 +14383,14 @@ function emitPerUnitRunStage(
     // builds, so the plans they were built from are not asked about again. A
     // beat whose Units have no completion receipt in this attempt (a loop-back
     // over artifacts alone) may still apply a fix, so it is not marked.
+    // A Code Generation beat is settled only when the plan approval also covers
+    // this attempt: a completion recorded in a new attempt without a rebuild
+    // leaves the approval behind, and the plan is asked about again first.
     const built = units.filter((u) => !ledger.skipped.has(u));
-    if (built.length > 0 && built.every((u) => ledger.receipts.has(u))) {
+    if (
+      built.length > 0 && built.every((u) => ledger.receipts.has(u)) &&
+      (node.slug !== "code-generation" || built.every((u) => planApprovalCoversAttempt(projectDir, u, directive)))
+    ) {
       directive.build_settled = true;
     }
     // Unit-major with checkpoints off: the stages still waiting are one question.
@@ -15678,6 +15700,11 @@ function unitMajorReopen(
   targetSlug: string,
   flags: ParsedFlags,
 ): PrintDirective | { kind: "error"; message: string } | "route" | null {
+  // Team mode has no solo walk: a checkout scoped to a Unit reopens that
+  // Unit's own step from its own records.
+  if (isTeamUnitOwnership(stateContent)) {
+    return teamScopedUnitReopen(projectDir, scope, stateContent, targetSlug, flags);
+  }
   const walk = unitJumpWalk(projectDir, scope, stateContent, flags.jumpUnit !== undefined);
   if (!walk) return null;
   const blockSlugs = walk.block.map((stage) => stage.slug);
@@ -15832,6 +15859,61 @@ function unitMajorReopen(
       (first ? backTo(first.unit, first.aside.stage) : "") +
       ` If they then ask for every unit, run \`next --stage ${targetSlug} --every-unit\`; if they name a unit, ` +
       `\`next --stage ${targetSlug} --unit <name>\`.`,
+  };
+}
+
+// A jump back to a per-Unit step in a checkout scoped to a Unit (team mode).
+// The Unit's records live in this checkout, so main cannot reopen them; the
+// scoped checkout reopens the step and every later per-Unit step for its own
+// Unit, through the same `jump reopen` a named-Unit jump uses in solo mode.
+// Only the scoped Unit can be reopened here: the caller already turned a bare
+// `--stage` into `--unit <this Unit>` and refused any other Unit. null when
+// this is no such jump (no scope stamp, or a stage outside the per-Unit block).
+function teamScopedUnitReopen(
+  projectDir: string,
+  scope: string,
+  stateContent: string,
+  targetSlug: string,
+  flags: ParsedFlags,
+): PrintDirective | null {
+  const stamp = readApplicableTeamUnitScopeStamp(projectDir, stateContent);
+  if (!stamp || flags.jumpUnit !== stamp.unit) return null;
+  const block = constructionUnitMajorBlock(scope, stateContent, true);
+  const targetIndex = block.findIndex((stage) => stage.slug === targetSlug);
+  if (targetIndex === -1) return null;
+  const unit = stamp.unit;
+  const target = block[targetIndex];
+  const stageName = target.name || targetSlug;
+  if (!unitsWithStageWork(projectDir, target, unitWorkContext(projectDir)).includes(unit)) {
+    return turnEndingPrint(
+      `Nothing to reopen: tell the person in one line, "unit ${unit} has not reached ` +
+        `${stageName} yet, so there is nothing to reopen." Run nothing else.`,
+    );
+  }
+  const stages = block.slice(targetIndex).map((stage) => stage.slug);
+  const unpark = (getField(stateContent, "Parked") ?? "").trim().length > 0
+    ? `\`${aidlcToolInvocation("state")} unpark\`, then `
+    : "";
+  const reopen =
+    `${aidlcToolInvocation("jump")} reopen --target ${targetSlug} --stages ${stages.join(",")} --units ${unit} --scope ${scopeArg(scope)}` +
+    (flags.change ? " --via change" : "");
+  const later = stages.length > 1 ? " and the steps after it" : "";
+  if (flags.change) {
+    return {
+      kind: "print",
+      message:
+        `Run ${unpark}\`${reopen}\` to reopen "${targetSlug}"${later} for unit "${unit}" as the person's change, ` +
+        `then tell the person in one line: "Making your change in ${stageName} for unit ${unit}." ` +
+        `and re-run \`next\` to continue. When "${targetSlug}" comes back, make the change from their own words; ` +
+        "they already said what to change, so do not ask whether to keep, change or redo its files.",
+    };
+  }
+  return {
+    kind: "print",
+    message:
+      `Run ${unpark}\`${reopen}\` to reopen "${targetSlug}"${later} for unit "${unit}", this checkout's Unit, ` +
+      `then tell the person in one line: "Reopened ${stageName}${later} for unit ${unit}." and re-run \`next\` to continue. ` +
+      `The step starts again with \`${aidlcToolInvocation("state")} unit start --stage ${targetSlug} --unit ${unit}\`.`,
   };
 }
 
