@@ -38310,6 +38310,45 @@ export function activeUnitCheckpoint(
 
 // Every open Unit of the stage, most recently touched first (see
 // openUnitCheckpoints).
+// True when Unit `unit` has a lifecycle receipt (UNIT_STARTED, UNIT_COMPLETED
+// or UNIT_SKIPPED) for `slug` in the current stage attempt. A per-Unit stage's
+// confirmations and reviews hang off that receipt: without it the gate later
+// refuses the Unit with UNIT_COMPLETION_MISSING.
+export function unitLifecycleRecorded(
+  projectDir: string,
+  slug: string,
+  unit: string,
+): boolean {
+  const audit = readAllAuditShards(projectDir);
+  if (!audit) return false;
+  const unitMajor = unitMajorLifecycleMode(projectDir);
+  return currentUnitLifecycleRows(projectDir, audit, slug, unitMajor).some(
+    (row) => row.unit === unit,
+  );
+}
+
+// True while a guard refusal about `stage` for `unit` still stands: the engine
+// has asked which way on, and the remedies it offers (a recovery review, a
+// fresh summary) are then the way, so the start-receipt guard stands aside for
+// them. Read from the refusal record, as the recovery ask itself is, so it
+// holds with or without a chat session's directive marker.
+export function guardRecoveryAskOpenFor(
+  projectDir: string,
+  stateContent: string,
+  stage: string,
+  unit: string,
+): boolean {
+  const record = readGuardRefusalRecord(guardRefusalPath(projectDir, stage, unit));
+  if (record === null) return false;
+  const closed = parseCheckboxes(stateContent).some(
+    (entry) => entry.slug === stage && (entry.state === "completed" || entry.state === "skipped"),
+  );
+  if (closed) return false;
+  const events = readAuditShardEvents(projectDir);
+  return record.resetToken === guardRefusalResetToken(projectDir, stage, unit, events) &&
+    (record.pendingApproval ?? "") === guardRefusalApprovalToken(events, stage, unit);
+}
+
 export function unitOpenCheckpoints(
   projectDir: string,
   slug: string,
