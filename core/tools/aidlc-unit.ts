@@ -1269,6 +1269,11 @@ function transportedAuditViolation(
     if (eventUnit !== unit) {
       return `${event.event} receipt belongs to Unit ${eventUnit ?? "(unitless)"}`;
     }
+    // A Unit's row with no attempt generation was written before rows carried
+    // one (a `jump reopen` row did not): on the Unit's first claim it can only
+    // be that claim's. Later receipts were stamped with run floors that count
+    // it, so leaving it behind would put every one of them off its floor.
+    if (eventGeneration === null && generation === 1) return null;
     if (eventGeneration !== String(generation)) {
       return (
         `${event.event} receipt belongs to attempt generation ` +

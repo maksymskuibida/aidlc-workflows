@@ -67,6 +67,7 @@ const ORCH = join(AIDLC_SRC, "tools", "aidlc-orchestrate.ts");
 const STATE = join(AIDLC_SRC, "tools", "aidlc-state.ts");
 const LOG = join(AIDLC_SRC, "tools", "aidlc-log.ts");
 const UTIL = join(AIDLC_SRC, "tools", "aidlc-utility.ts");
+const JUMP = join(AIDLC_SRC, "tools", "aidlc-jump.ts");
 
 const ENV: NodeJS.ProcessEnv = {
   ...process.env,
@@ -634,6 +635,49 @@ describe("t324 team-owned unit progress and per-unit gates", () => {
     logReviewReady(proj, "functional-design", "alpha", String(body.reviewer));
     expect(named(runNext(proj))).toEqual(["state unit complete --stage functional-design --unit alpha", "orchestrate next"]);
     expect(runState(proj, ["unit", "complete", "--stage", "functional-design", "--unit", "alpha"]).rc).toBe(0);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("a per-stage Unit reopened at an approved step is gated again at that step and each later one", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    const reopened = ["functional-design", "nfr-requirements"];
+    for (const stage of reopened) {
+      const body = runNext(proj);
+      expect(body).toMatchObject({ stage, unit: "alpha", gate: false });
+      settleBody(proj, body);
+      const gate = runNext(proj);
+      expect(gate).toMatchObject({ stage, unit: "alpha", gate: true, unit_gate: "per-stage" });
+      approveGate(proj, gate);
+    }
+
+    const jumped = spawnSync(BUN, [
+      JUMP,
+      "reopen",
+      "--target",
+      reopened[0],
+      "--stages",
+      reopened.join(","),
+      "--units",
+      "alpha",
+      "--project-dir",
+      proj,
+    ], { timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), encoding: "utf-8", env: ENV });
+    expect(jumped.status, `${jumped.stdout}${jumped.stderr}`).toBe(0);
+    const rejection = readAuditShardEvents(proj).filter((row) => row.event === "GATE_REJECTED").at(-1)!;
+    expect(auditBlockField(rejection.block, "Gate Scope")).toBe("per-stage");
+    for (const stage of reopened) {
+      expect(unitGateStatus(proj, stage, "alpha", "per-stage")).toBe("revising");
+    }
+
+    // Each reopened step runs again and asks its own gate before the next one.
+    for (const stage of reopened) {
+      const body = runNext(proj);
+      expect(body).toMatchObject({ kind: "run-stage", stage, unit: "alpha", gate: false });
+      settleBody(proj, body);
+      const gate = runNext(proj);
+      expect(gate).toMatchObject({ stage, unit: "alpha", gate: true, unit_gate: "per-stage" });
+      approveGate(proj, gate);
+    }
+    expect(runNext(proj)).toMatchObject({ stage: "nfr-design", unit: "alpha", gate: false });
   }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
 
   test("unit-end rhythm emits one chain gate after code-generation", () => {
