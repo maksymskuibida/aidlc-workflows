@@ -409,7 +409,10 @@ describe("t-unit-receipt-only-step: work genuinely left keeps Run next", () => {
       const d = next(proj);
       expect(d.kind, JSON.stringify(d)).toBe("run-stage");
       expect(d.unit).toBe("unit-b");
-      expect(JSON.stringify(d)).not.toContain(COMPLETE_B);
+      // The Unit's whole pass is named in its steps note; the step itself is
+      // the stage body, not the receipt.
+      const { unit_steps_note: _steps, ...step } = d;
+      expect(JSON.stringify(step)).not.toContain(COMPLETE_B);
 
       const r = run(ORCHESTRATE, ["report", "--stage", SLUG, "--result", "awaiting-approval"], proj);
       const refusal = directiveOf(r.out);

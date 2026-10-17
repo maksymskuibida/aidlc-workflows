@@ -836,6 +836,18 @@ export function planApprovalCoversAttempt(projectDir: string, unit: string, issu
   return stalePlanApprovalReceiptsForTarget(projectDir, authority.intentId, authority.targetId, authority.runFloor).length === 0;
 }
 
+/**
+ * True while the engine's Plan Approval question is open for this Unit: asked,
+ * and not yet answered for it. Read from the question's own record, so it
+ * holds with or without a chat session's directive marker.
+ */
+export function planApprovalQuestionOpenFor(projectDir: string, unit: string): boolean {
+  const record = readPlanApprovalAsk(projectDir, intentIdFor(projectDir));
+  if (record === null) return false;
+  if (!record.targets.some((target) => target.unit === unit)) return false;
+  return !(record.results ?? []).some((result) => result.unit === unit);
+}
+
 function withPlanState<T extends RunStageDirective | InvokeSwarmDirective>(
   directive: T,
   state: CodeGenerationPlanApprovalState,
