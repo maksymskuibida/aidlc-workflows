@@ -184,6 +184,12 @@ export interface UnitClaimPayload {
   predecessor_oid: string | null;
   gate_rhythm: "per-stage" | "unit-end";
   audit_shard?: string;
+  /**
+   * The claiming clone's own shard, kept only when it is not `audit_shard`: it
+   * was already on main when the Unit was claimed or first published, so the
+   * Unit's rows are in `audit_shard` and this one stays as main has it.
+   */
+  clone_audit_shard?: string;
   candidate_tree_oid?: string;
   candidate_head_oid?: string;
 }
@@ -384,6 +390,9 @@ function readPayload(
       (parsed.audit_shard !== undefined &&
         (typeof parsed.audit_shard !== "string" ||
           !/^[A-Za-z0-9._-]+\.md$/.test(parsed.audit_shard))) ||
+      (parsed.clone_audit_shard !== undefined &&
+        (typeof parsed.clone_audit_shard !== "string" ||
+          !/^[A-Za-z0-9._-]+\.md$/.test(parsed.clone_audit_shard))) ||
       (
         parsed.candidate_tree_oid !== undefined &&
         !/^[0-9a-f]{40}$/.test(parsed.candidate_tree_oid)
@@ -1392,6 +1401,67 @@ function transportableCandidateTree(
   };
 }
 
+// The team shard a Unit's rows travel in. A clone that ran the earlier phases
+// already has its own shard on main, and a candidate may add only a new shard,
+// never change one main holds: claimed from such a clone, the Unit's rows go
+// in a shard named for the Unit's attempt instead.
+function teamAuditShard(
+  projectDir: string,
+  baseOid: string,
+  recordPrefix: string,
+  shard: string,
+  unit: string,
+  generation: number,
+): string {
+  if (!gitPathExistsAt(projectDir, baseOid, `${recordPrefix}/audit/${shard}`)) return shard;
+  return `${shard.replace(/\.md$/, "")}-${unit}-g${generation}.md`;
+}
+
+// A Unit claimed before its rows had a team shard of their own wrote them into
+// the clone's shard, which main already holds. One commit on the Unit's branch
+// moves them: the clone's shard goes back to main's bytes, and the rows after
+// them (shards are append-only) open the team shard. The branch then lands the
+// way a Unit claimed in a fresh clone does. Done once; a branch that already
+// holds the split is left as it is.
+function splitTeamAuditShard(
+  projectDir: string,
+  recordPrefix: string,
+  baseOid: string,
+  cloneShard: string,
+  teamShard: string,
+  unit: string,
+): boolean {
+  const clonePath = `${recordPrefix}/audit/${cloneShard}`;
+  const teamPath = `${recordPrefix}/audit/${teamShard}`;
+  return withAuditLock(projectDir, () => {
+    const base = gitTextAt(projectDir, baseOid, clonePath);
+    const head = gitPathExistsAt(projectDir, "HEAD", clonePath) ? gitTextAt(projectDir, "HEAD", clonePath) : base;
+    if (head === base) return false;
+    if (!head.startsWith(base)) {
+      fail(
+        `Unit "${unit}" cannot move its audit rows out of ${clonePath}: on this branch the shard does not begin ` +
+          "with the rows main holds. Bring main into the branch, then publish again.",
+      );
+    }
+    if (gitPathExistsAt(projectDir, "HEAD", teamPath)) {
+      fail(`Unit "${unit}" cannot move its audit rows: ${teamPath} already exists on this branch.`);
+    }
+    const restored = git(projectDir, ["checkout", baseOid, "--", clonePath]);
+    if (!restored.ok) fail(`Cannot restore ${clonePath}: ${restored.stderr.trim()}`);
+    writeFileSync(join(projectDir, teamPath), AUDIT_SHARD_HEADER + head.slice(base.length), "utf-8");
+    const added = git(projectDir, ["add", "--", teamPath]);
+    if (!added.ok) fail(`Cannot stage ${teamPath}: ${added.stderr.trim()}`);
+    const committed = git(projectDir, [
+      "commit", "-q", "-m", `Unit ${unit}: its audit rows move to its team shard ${teamShard}`,
+      "-m", `${cloneShard} is already on main, and a published Unit may only add a shard of its own. ` +
+        `The rows this branch appended to it now open ${teamShard}; ${cloneShard} is as main has it.`,
+      "--", clonePath, teamPath,
+    ]);
+    if (!committed.ok) fail(`Cannot commit the audit shard split: ${committed.stderr.trim()}`);
+    return true;
+  });
+}
+
 function candidateBoundary(
   projectDir: string,
   baseOid: string,
@@ -1840,32 +1910,18 @@ function publishUnit(args: string[], projectDir?: string): void {
   ) {
     fail(`Unit "${unit}" claim is stale or released; publication refused.`);
   }
-  const headOid = gitOutput(pd, ["rev-parse", "HEAD"], "Cannot resolve candidate HEAD");
-  const rawHeadTree = gitOutput(
-    pd,
-    ["rev-parse", "HEAD^{tree}"],
-    "Cannot resolve candidate tree",
-  );
   const recordPrefix = relativeRecordDir(pd);
   if (!recordPrefix) fail("Cannot resolve the active intent record for publication.");
   // The shard the claim bound at claim time, which is the one pin inspects
   // (candidateEvidence fails without it). Reading it from the claim rather
   // than resolving a name here keeps one owner for the shard's identity.
-  const auditShard = current.payload.audit_shard;
-  if (!auditShard || !/^[A-Za-z0-9._-]+\.md$/.test(auditShard)) {
+  const claimShard = current.payload.audit_shard;
+  if (!claimShard || !/^[A-Za-z0-9._-]+\.md$/.test(claimShard)) {
     fail(
       `Unit "${unit}" claim has no bound audit shard; release and re-claim it before publishing again.`,
     );
   }
-  const projected = transportableCandidateTree(
-    pd,
-    rawHeadTree,
-    recordPrefix,
-    auditShard,
-    unit,
-    current.generation,
-  );
-  const headTree = projected.tree;
+  let headOid = gitOutput(pd, ["rev-parse", "HEAD"], "Cannot resolve candidate HEAD");
   const integration = fetchIntegration(pd);
   const integrationIsAncestor = localGit(
     pd,
@@ -1877,6 +1933,34 @@ function publishUnit(args: string[], projectDir?: string): void {
   const publicationIntegrationRef = integrationIsAncestor
     ? integration.ref
     : current.payload.integration_ref;
+  // A claim made before Units had a team shard of their own names the clone's
+  // shard; the first publication that finds it on the base moves the Unit's
+  // rows to the team shard, and the claim keeps both names from then on.
+  const cloneShard = current.payload.clone_audit_shard ?? claimShard;
+  const auditShard = current.payload.clone_audit_shard !== undefined
+    ? claimShard
+    : teamAuditShard(pd, publicationBaseOid, recordPrefix, claimShard, unit, current.generation);
+  if (auditShard !== cloneShard) {
+    if (splitTeamAuditShard(pd, recordPrefix, publicationBaseOid, cloneShard, auditShard, unit)) {
+      headOid = gitOutput(pd, ["rev-parse", "HEAD"], "Cannot resolve candidate HEAD");
+    }
+    // Rows written from here on are the team shard's.
+    if (stamp.audit_shard !== auditShard) writeUnitScopeStamp(pd, { ...stamp, audit_shard: auditShard });
+  }
+  const rawHeadTree = gitOutput(
+    pd,
+    ["rev-parse", "HEAD^{tree}"],
+    "Cannot resolve candidate tree",
+  );
+  const projected = transportableCandidateTree(
+    pd,
+    rawHeadTree,
+    recordPrefix,
+    auditShard,
+    unit,
+    current.generation,
+  );
+  const headTree = projected.tree;
   if (
     current.payload.candidate_tree_oid === headTree &&
     current.payload.candidate_head_oid === headOid &&
@@ -1902,6 +1986,8 @@ function publishUnit(args: string[], projectDir?: string): void {
     integration_ref: publicationIntegrationRef,
     candidate_tree_oid: headTree,
     candidate_head_oid: headOid,
+    audit_shard: auditShard,
+    ...(auditShard !== cloneShard ? { clone_audit_shard: cloneShard } : {}),
   };
   const commit = createClaimCommit(
     pd,
@@ -3648,7 +3734,13 @@ function claimUnit(args: string[], projectDir?: string): void {
       : (current?.generation ?? 0) + 1;
   const nonce = randomUUID();
   const owner = claimOwnerLabel(pd, flags.team);
-  const auditShard = auditShardName(pd);
+  // In a clone that ran the earlier phases its own shard is already on main;
+  // the claim starts on the team shard its rows will travel in.
+  const cloneShard = auditShardName(pd);
+  const claimRecordPrefix = relativeRecordDir(pd);
+  const auditShard = claimRecordPrefix
+    ? teamAuditShard(pd, integration.oid, claimRecordPrefix, cloneShard, unit, generation)
+    : cloneShard;
   const rhythm =
     flags.rhythm === "unit-end" || flags.rhythm === "per-stage"
       ? flags.rhythm
@@ -3669,6 +3761,7 @@ function claimUnit(args: string[], projectDir?: string): void {
     predecessor_oid: current?.oid ?? null,
     gate_rhythm: rhythm,
     audit_shard: auditShard,
+    ...(auditShard !== cloneShard ? { clone_audit_shard: cloneShard } : {}),
   };
   const commit = createClaimCommit(pd, current?.oid ?? integration.oid, payload);
   const stamp: UnitScopeStamp = {
