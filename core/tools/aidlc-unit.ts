@@ -504,24 +504,35 @@ function writeTreeWithBlob(
   path: string,
   content: string,
 ): string {
+  return writeTreeWithEntries(projectDir, baseTreeOid, [{ path, content }]);
+}
+
+// A tree equal to `baseTreeOid` except for the given files' new text.
+function writeTreeWithEntries(
+  projectDir: string,
+  baseTreeOid: string,
+  entries: ReadonlyArray<{ path: string; content: string }>,
+): string {
   const scratch = mkdtempSync(join(tmpdir(), "aidlc-unit-tree-"));
   const index = join(scratch, "index");
   try {
     const env = { GIT_INDEX_FILE: index };
     const read = git(projectDir, ["read-tree", baseTreeOid], env);
     if (!read.ok) fail(`git read-tree failed: ${read.stderr.trim()}`);
-    const blob = spawnSync("git", ["hash-object", "-w", "--stdin"], {
-      cwd: projectDir,
-      encoding: "utf-8",
-      input: content,
-    });
-    if (blob.status !== 0) fail(`git hash-object failed: ${(blob.stderr ?? "").trim()}`);
-    const update = git(
-      projectDir,
-      ["update-index", "--add", "--cacheinfo", `100644,${(blob.stdout ?? "").trim()},${path}`],
-      env,
-    );
-    if (!update.ok) fail(`git update-index failed: ${update.stderr.trim()}`);
+    for (const entry of entries) {
+      const blob = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: projectDir,
+        encoding: "utf-8",
+        input: entry.content,
+      });
+      if (blob.status !== 0) fail(`git hash-object failed: ${(blob.stderr ?? "").trim()}`);
+      const update = git(
+        projectDir,
+        ["update-index", "--add", "--cacheinfo", `100644,${(blob.stdout ?? "").trim()},${entry.path}`],
+        env,
+      );
+      if (!update.ok) fail(`git update-index failed: ${update.stderr.trim()}`);
+    }
     const tree = git(projectDir, ["write-tree"], env);
     if (!tree.ok) fail(`git write-tree failed: ${tree.stderr.trim()}`);
     return tree.stdout.trim();
@@ -1401,6 +1412,69 @@ function transportableCandidateTree(
   };
 }
 
+// A Unit's own review record: `<record>/.aidlc-engine/reviews/<stage>/units/<unit>/<attempt>/<file>`,
+// the one record path pin's ownership boundary lets a candidate carry.
+function isUnitReviewRecordPath(path: string, recordPrefix: string, unit: string): boolean {
+  const root = `${recordPrefix}/${REVIEW_RECORDS_DIR}/`;
+  if (!path.startsWith(root)) return false;
+  const parts = path.slice(root.length).split("/");
+  return parts.length === 5 && parts[1] === "units" && parts[2] === unit && parts.every(Boolean);
+}
+
+// A review record the candidate carries for pin alone: the Unit's own, and
+// ignored by the checkout's .gitignore as framework state is in every project.
+// A merge landing leaves it out of the merge commit, so main never tracks it.
+function isCarriedReviewRecord(
+  projectDir: string,
+  path: string,
+  recordPrefix: string | null,
+  unit: string,
+): boolean {
+  return recordPrefix !== null &&
+    isUnitReviewRecordPath(path, recordPrefix, unit) &&
+    git(projectDir, ["check-ignore", "-q", "--no-index", "--", path]).ok;
+}
+
+// The review records the candidate's transported REVIEW_COMPLETED rows name.
+// They are framework state, git-ignored in every project, so the Unit's
+// branch never holds them; pin reads each one from the candidate to count its
+// review. Publish carries each one whose bytes still match the row's digest,
+// from this checkout, the way it carries the projected shard; a record that
+// is missing or changed is left out, and pin does not count that review.
+function unitReviewRecordEntries(
+  projectDir: string,
+  treeOid: string,
+  recordPrefix: string,
+  auditShard: string,
+  unit: string,
+  generation: number,
+): Array<{ path: string; content: string }> {
+  const shardPath = `${recordPrefix}/audit/${auditShard}`;
+  if (!gitPathExistsAt(projectDir, treeOid, shardPath)) return [];
+  const entries = new Map<string, string>();
+  for (const block of auditShardBlocks(gitTextAt(projectDir, treeOid, shardPath))) {
+    if (auditBlockField(block, "Event") !== "REVIEW_COMPLETED") continue;
+    const event: CandidateAuditEvent = {
+      event: "REVIEW_COMPLETED", block, timestamp: auditBlockField(block, "Timestamp") ?? "",
+      shard: shardPath, shardIndex: 0, pos: 0,
+    };
+    if (transportedAuditViolation(event, unit, generation) !== null) continue;
+    const ref = auditBlockField(block, "Review Record");
+    const digest = auditBlockField(block, "Review Record Digest");
+    if (!ref || !digest) continue;
+    const path = `${recordPrefix}/${ref}`;
+    if (!isUnitReviewRecordPath(path, recordPrefix, unit) || entries.has(path)) continue;
+    let bytes: string;
+    try {
+      bytes = readFileSync(join(projectDir, path), "utf-8");
+    } catch {
+      continue;
+    }
+    if (reviewRecordDigest(bytes) === digest) entries.set(path, bytes);
+  }
+  return [...entries].map(([path, content]) => ({ path, content }));
+}
+
 // The team shard a Unit's rows travel in. A clone that ran the earlier phases
 // already has its own shard on main, and a candidate may add only a new shard,
 // never change one main holds: claimed from such a clone, the Unit's rows go
@@ -1960,7 +2034,12 @@ function publishUnit(args: string[], projectDir?: string): void {
     unit,
     current.generation,
   );
-  const headTree = projected.tree;
+  const reviewRecords = unitReviewRecordEntries(
+    pd, projected.tree, recordPrefix, auditShard, unit, current.generation,
+  );
+  const headTree = reviewRecords.length > 0
+    ? writeTreeWithEntries(pd, projected.tree, reviewRecords)
+    : projected.tree;
   if (
     current.payload.candidate_tree_oid === headTree &&
     current.payload.candidate_head_oid === headOid &&
@@ -2703,9 +2782,11 @@ function inspectLandedTree(
     : {
         violations: ["active intent record is unavailable"],
       };
+  const carriedOnly = (path: string): boolean =>
+    isCarriedReviewRecord(projectDir, path, recordPrefix, transaction.unit);
   const allowedCommitChanges = new Set(
     candidatePaths.filter((path) =>
-      !isEngineMergeMetadata(projectDir, path, recordPrefix)
+      !isEngineMergeMetadata(projectDir, path, recordPrefix) && !carriedOnly(path)
     ),
   );
   const actualCommitChanges = gitOutput(
@@ -2720,7 +2801,7 @@ function inspectLandedTree(
   const objectMismatches: CandidateExactDetails["object_mismatches"] = [];
   for (const path of candidatePaths) {
     const actual = gitObjectAt(projectDir, treeish, path);
-    const expectedTreeish = isEngineMergeMetadata(projectDir, path, recordPrefix)
+    const expectedTreeish = isEngineMergeMetadata(projectDir, path, recordPrefix) || carriedOnly(path)
       ? mainParent
       : transaction.pinned_oid;
     const expected = gitObjectAt(projectDir, expectedTreeish, path);
@@ -3006,6 +3087,13 @@ function landGit(
       ["merge", "--no-commit", "--no-ff", transaction.pinned_oid],
     );
   restoreMainMetadata(projectDir, changed);
+  const landingRecordPrefix = relativeRecordDir(projectDir);
+  for (const path of changed.filter((path) =>
+    isCarriedReviewRecord(projectDir, path, landingRecordPrefix, transaction.unit)
+  )) {
+    const dropped = git(projectDir, ["rm", "-q", "--cached", "--ignore-unmatch", "--", path]);
+    if (!dropped.ok) fail(`Failed to leave the review record ${path} out of the merge: ${dropped.stderr.trim()}.`);
+  }
   const conflicts = conflictFiles(projectDir).filter(
     (path) => !isEngineMergeMetadata(projectDir, path),
   );
