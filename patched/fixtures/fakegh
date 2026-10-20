@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""A stand-in for `gh` in the scratch test.
+
+`gh pr view <ref> [--repo <owner/repo>] --json <fields>` answers from the JSON
+file named by FAKE_GH_DB: a map from `owner/repo#n` to the object gh returns.
+`gh pr create --title T --body-file F --head B --base M [--draft]` registers an
+OPEN pull request for the cwd repository (its `owner/repo` comes from the git
+config key `fakegh.repo`), copies the body next to the database, and prints the
+URL as gh does. Anything else exits 1.
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+args = sys.argv[1:]
+db_path = os.environ['FAKE_GH_DB']
+db = json.load(open(db_path)) if os.path.exists(db_path) else {}
+
+
+def save():
+    json.dump(db, open(db_path, 'w'), indent=1)
+
+
+def flag(name, default=None):
+    return args[args.index(name) + 1] if name in args else default
+
+
+if len(args) >= 2 and args[0] == 'pr' and args[1] == 'view':
+    ref = args[2]
+    repo = flag('--repo')
+    fields = flag('--json')
+    key = ref if ref in db else f'{repo}#{ref}' if repo else None
+    if key is None or key not in db:
+        sys.stderr.write(f'fakegh: no such pull request {ref}\n')
+        sys.exit(1)
+    record = db[key]
+    out = {f: record.get(f) for f in fields.split(',')} if fields else record
+    print(json.dumps(out))
+    sys.exit(0)
+
+if len(args) >= 2 and args[0] == 'pr' and args[1] == 'create':
+    repo = subprocess.run(['git', 'config', '--get', 'fakegh.repo'], capture_output=True, text=True).stdout.strip()
+    if not repo:
+        sys.stderr.write('fakegh: set `git config fakegh.repo owner/repo` in this checkout\n')
+        sys.exit(1)
+    head = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    number = 1 + sum(1 for k in db if k.startswith(repo + '#'))
+    key = f'{repo}#{number}'
+    url = f'https://github.com/{repo}/pull/{number}'
+    db[key] = {
+        'url': url, 'state': 'OPEN', 'mergedAt': None, 'mergeCommit': None,
+        'headRefOid': head, 'headRefName': flag('--head'), 'baseRefName': flag('--base'),
+        'title': flag('--title'), 'isDraft': '--draft' in args,
+        'reviewDecision': None, 'latestReviews': [],
+    }
+    body_file = flag('--body-file')
+    if body_file:
+        with open(body_file) as src, open(os.path.join(os.path.dirname(db_path), f'pr-{repo.replace("/", "_")}-{number}.md'), 'w') as dst:
+            dst.write(src.read())
+    save()
+    print(url)
+    sys.exit(0)
+
+sys.stderr.write('fakegh: only `pr view` and `pr create` are supported\n')
+sys.exit(1)
