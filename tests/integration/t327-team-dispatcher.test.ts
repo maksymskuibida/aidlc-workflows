@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -707,9 +708,17 @@ describe("t327 team construction dispatcher", () => {
     const scopedCheckoutBefore = snapshotFiles(scopedDir);
     const scoped = run(UTILITY, ["status"], scopedDir);
     expect(scoped.status, scoped.out).toBe(0);
-    expect(scoped.stdout).toBe(unscoped.stdout);
     expect(snapshotFiles(project)).toEqual(scopedBefore);
     expect(snapshotFiles(scopedDir)).toEqual(scopedCheckoutBefore);
+    // Both checkouts now see the claim's worktree, and say so the same way.
+    const unscopedWithWorktree = run(UTILITY, ["status"], project);
+    expect(scoped.stdout).toBe(unscopedWithWorktree.stdout);
+    expect(scoped.stdout).toContain(
+      `\`claimed\` is claimed by claimed-team (attempt 2): worktree \`${realpathSync(scopedDir)}\` on branch \`scoped-claimed\`.`,
+    );
+    expect(scoped.stdout.replace(/\n {2}- `claimed` is claimed by .*$/m, "")).toBe(
+      unscoped.stdout.replace(/\n {2}- `claimed` is claimed by .*$/m, ""),
+    );
 
     const routed = run(
       DISPATCHER,
