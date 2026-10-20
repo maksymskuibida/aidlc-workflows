@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# This fork tests on this machine instead of GitHub Actions. A push to main runs the fast local tests on
+# the commit being pushed and also needs a full local run of that commit (see patched/scripts/test-local.sh).
+# Every other ref (branches cut from upstream/main have no patched/ folder, tags, deletes) is skipped before
+# anything under patched/scripts is called. Turned on once per clone with: git config core.hooksPath patched/hooks
+set -euo pipefail
+ROOT=$(git rev-parse --show-toplevel)
+COMMON=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+ZERO=0000000000000000000000000000000000000000
+status=0
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$ZERO" ] && continue
+  [ "$remote_ref" = refs/heads/main ] || continue
+  base=$remote_sha
+  if [ "$base" = "$ZERO" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+    base=$(git merge-base "$local_sha" refs/remotes/origin/main 2>/dev/null || true)
+  fi
+  short=$(git rev-parse --short "$local_sha")
+  echo "pre-push: fast local tests on $short for $remote_ref"
+  if ! "$ROOT/patched/scripts/test-local.sh" fast "$local_sha" ${base:+"$base"}; then
+    echo "pre-push: fast local tests failed on $short; nothing was pushed." >&2
+    status=1
+    continue
+  fi
+  if ! grep -qxF "$("$ROOT/patched/scripts/test-local.sh" key "$local_sha")" "$COMMON/aidlc-tested-trees" 2>/dev/null; then
+    echo "pre-push: main needs a full local run of $short first (smoke, unit and integration; about 4 hours):" >&2
+    echo "  patched/scripts/test-local.sh full $short" >&2
+    status=1
+  fi
+done
+exit "$status"
