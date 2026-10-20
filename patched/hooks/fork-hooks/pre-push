@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Runs the pushing worktree's own patched/hooks/pre-push. A worktree without one
+# (a branch cut from upstream/main) pushes with no hook. One dispatcher serves
+# every worktree of the clone, so a worktree on another branch never runs main's
+# copy of the hook. Install once per clone (RUNBOOK section 1a):
+#   d="$(git rev-parse --git-common-dir)/fork-hooks" && mkdir -p "$d" &&
+#     cp patched/hooks/fork-hooks/pre-push "$d/pre-push" && chmod +x "$d/pre-push" &&
+#     git config core.hooksPath "$d"
+hook="$(git rev-parse --show-toplevel)/patched/hooks/pre-push"
+[ -x "$hook" ] || exit 0
+exec "$hook" "$@"
