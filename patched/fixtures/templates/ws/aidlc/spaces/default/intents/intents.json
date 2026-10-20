@@ -1,0 +1,12 @@
+[
+  {
+    "uuid": "01a1419a-1c76-7c27-b6ce-1aeee30fdcca",
+    "slug": "demo-1-uniform-test",
+    "dirName": "261015-demo-1-uniform-test",
+    "scope": "classic",
+    "repos": [
+      "svc"
+    ],
+    "status": "in-flight"
+  }
+]
