@@ -1,0 +1,13 @@
+# Workspaces, remotes, logs and transcripts the fixtures create next to themselves.
+fixtures/pi/
+fixtures/pi-*/
+fixtures/pj/
+fixtures/pj-*/
+fixtures/*.git/
+fixtures/seed*/
+fixtures/svcseed*/
+fixtures/*.log
+fixtures/*.jsonl
+fixtures/pr-*.md
+fixtures/fakegh4.json
+*.replaced-*
