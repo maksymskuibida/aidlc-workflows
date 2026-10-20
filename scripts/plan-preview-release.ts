@@ -180,16 +180,19 @@ export async function previewSourceDigest(
   return source?.repository === sourceRepository ? source.digest : null;
 }
 
+// A fork that publishes its own previews numbers its builds from a floor
+// (AIDLC_PREVIEW_BUILD_FLOOR), so its ids never repeat an upstream preview's.
 export function nextPreviewVersion(
   existing: readonly string[],
   base: string,
   date: string,
+  floor = Number(process.env.AIDLC_PREVIEW_BUILD_FLOOR ?? 0) || 0,
 ): string {
   const builds = existing
     .map(parseVersion)
     .filter((parsed) => parsed.date === date)
     .map((parsed) => parsed.build ?? 0);
-  return previewVersion(base, date, Math.max(0, ...builds) + 1);
+  return previewVersion(base, date, Math.max(floor, ...builds) + 1);
 }
 
 function git(cwd: string, args: readonly string[]): string | null {
