@@ -9,6 +9,14 @@ on:
 permissions:
   contents: read
 
+# This fork releases on demand (its scheduled run stops at validate): builds are numbered from .101 so they never repeat an
+# upstream preview's id, and the update test starts from upstream's last stable release. The fork runs no tests here: they
+# run locally before every push (patched/hooks/pre-push) and in full before a release (patched/scripts/release.sh), so a
+# fork release only builds, attests and publishes, and spends no Actions minutes on suites.
+env:
+  AIDLC_PREVIEW_BUILD_FLOOR: "100"
+  AIDLC_PREVIOUS_RELEASE_REPOSITORY: awslabs/aidlc-workflows
+
 # Scheduled and manual preview runs share one repository-wide slot so each run
 # observes prior publications before allocating another retry-safe build id.
 concurrency:
@@ -17,6 +25,7 @@ concurrency:
 
 jobs:
   validate:
+    if: ${{ github.event_name != 'schedule' || github.repository == 'awslabs/aidlc-workflows' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -73,6 +82,7 @@ jobs:
   gate:
     name: Contract checks
     needs: validate
+    if: ${{ github.repository == 'awslabs/aidlc-workflows' }}
     # Full Suite owns the test matrix; do not run the PR test suite again here.
     # Contract checks still run when publication is deduplicated.
     runs-on: ubuntu-latest
@@ -91,6 +101,7 @@ jobs:
 
   full_suite:
     needs: [validate, gate]
+    if: ${{ github.repository == 'awslabs/aidlc-workflows' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
@@ -127,7 +138,7 @@ jobs:
   # preview notes carry the report without failing the preview workflow.
   test:
     name: Release tests
-    if: ${{ !cancelled() && needs.validate.result == 'success' }}
+    if: ${{ !cancelled() && needs.validate.result == 'success' && github.repository == 'awslabs/aidlc-workflows' }}
     needs: [validate, full_suite]
     runs-on: ubuntu-latest
     permissions:
@@ -228,7 +239,7 @@ jobs:
 
   build:
     needs: [validate, native-smoke]
-    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.native-smoke.result == 'success' }}
+    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.validate.outputs.skip != 'true' && (needs.native-smoke.result == 'success' || github.repository != 'awslabs/aidlc-workflows') }}
     strategy:
       matrix:
         include:
@@ -279,7 +290,7 @@ jobs:
 
   musl-smoke:
     needs: build
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && github.repository == 'awslabs/aidlc-workflows' }}
     strategy:
       fail-fast: false
       matrix:
@@ -338,7 +349,7 @@ jobs:
 
   windows-lifecycle:
     needs: stage-release
-    if: ${{ !cancelled() && needs.stage-release.result == 'success' }}
+    if: ${{ !cancelled() && needs.stage-release.result == 'success' && github.repository == 'awslabs/aidlc-workflows' }}
     runs-on: windows-latest
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -522,7 +533,7 @@ jobs:
 
   unix-lifecycle:
     needs: stage-release
-    if: ${{ !cancelled() && needs.stage-release.result == 'success' }}
+    if: ${{ !cancelled() && needs.stage-release.result == 'success' && github.repository == 'awslabs/aidlc-workflows' }}
     strategy:
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-15]
@@ -654,7 +665,7 @@ jobs:
   # release back on it).
   update-from-previous:
     needs: [validate, stage-release]
-    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.stage-release.result == 'success' }}
+    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.stage-release.result == 'success' && github.repository == 'awslabs/aidlc-workflows' }}
     strategy:
       fail-fast: false
       matrix:
@@ -686,7 +697,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          previous="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+          previous="$(gh release list --repo "${AIDLC_PREVIOUS_RELEASE_REPOSITORY:-$GITHUB_REPOSITORY}" --exclude-drafts --exclude-pre-releases \
             --limit 20 --json tagName --jq '[.[].tagName | select(. != env.CANDIDATE_TAG)] | .[0] // empty')"
           test -n "$previous"
           echo "tag=$previous" >>"$GITHUB_OUTPUT"
@@ -703,8 +714,8 @@ jobs:
           bun scripts/ci-update-from-previous.ts --channel "$CHANNEL" --previous "$PREVIOUS_TAG" --candidate build/release
 
   publish:
-    needs: [validate, musl-smoke, windows-lifecycle, unix-lifecycle]
-    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.musl-smoke.result == 'success' && needs.windows-lifecycle.result == 'success' && needs.unix-lifecycle.result == 'success' }}
+    needs: [validate, stage-release, musl-smoke, windows-lifecycle, unix-lifecycle]
+    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.stage-release.result == 'success' && ((needs.musl-smoke.result == 'success' && needs.windows-lifecycle.result == 'success' && needs.unix-lifecycle.result == 'success') || github.repository != 'awslabs/aidlc-workflows') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -766,7 +777,7 @@ jobs:
 
   release:
     needs: [validate, full_suite, test, publish, update-from-previous]
-    if: ${{ !cancelled() && needs.validate.result == 'success' && needs.test.result == 'success' && needs.publish.result == 'success' }}
+    if: ${{ !cancelled() && needs.validate.result == 'success' && (needs.test.result == 'success' || github.repository != 'awslabs/aidlc-workflows') && needs.publish.result == 'success' }}
     runs-on: ubuntu-latest
     environment: preview
     permissions:
@@ -781,6 +792,7 @@ jobs:
           name: attested-release
           path: build/release
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ needs.test.result == 'success' }}
         with:
           name: preview-test-report
           path: ${{ runner.temp }}/preview-test-report
@@ -810,7 +822,9 @@ jobs:
           set -euo pipefail
           plan="$RUNNER_TEMP/aidlc-preview-plan.json"
           printf '%s\n' "$PREVIEW_PLAN" >"$plan"
-          if [ "$FULL_SUITE_RESULT" != success ] || [ "$UPDATE_RESULT" != success ]; then
+          # This fork tests on its own machine, so the test job and its report are skipped here.
+          if [ -f "$RUNNER_TEMP/preview-test-report/preview-test-report.md" ] &&
+            { [ "$FULL_SUITE_RESULT" != success ] || [ "$UPDATE_RESULT" != success ]; }; then
             bun scripts/ci-preview-test-report.ts --stage-notes "$plan" \
               "$RUNNER_TEMP/preview-test-report/preview-test-report.md"
           fi
@@ -848,7 +862,7 @@ jobs:
 
   release-result:
     name: Release result
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.validate.result != 'skipped' }}
     needs: [validate, full_suite, test, release]
     runs-on: ubuntu-latest
     steps:
@@ -861,7 +875,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$VALIDATE_RESULT" = success
-          test "$TEST_RESULT" = success
+          # The fork runs its tests locally, so here they are skipped.
+          test "$TEST_RESULT" = success || { test "$GITHUB_REPOSITORY" != awslabs/aidlc-workflows && test "$TEST_RESULT" = skipped; }
           if [ "$RELEASE_SKIP" = true ]; then
             test "$RELEASE_RESULT" = skipped
             exit 0
