@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+# This fork releases on demand (its scheduled run stops at validate): builds are numbered from .101 so they never repeat an
+# upstream preview's id, and the update test starts from upstream's last stable release.
+env:
+  AIDLC_PREVIEW_BUILD_FLOOR: "100"
+  AIDLC_PREVIOUS_RELEASE_REPOSITORY: awslabs/aidlc-workflows
+
 # Scheduled and manual preview runs share one repository-wide slot so each run
 # observes prior publications before allocating another retry-safe build id.
 concurrency:
@@ -17,6 +23,7 @@ concurrency:
 
 jobs:
   validate:
+    if: ${{ github.event_name != 'schedule' || github.repository == 'awslabs/aidlc-workflows' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -686,7 +693,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          previous="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+          previous="$(gh release list --repo "${AIDLC_PREVIOUS_RELEASE_REPOSITORY:-$GITHUB_REPOSITORY}" --exclude-drafts --exclude-pre-releases \
             --limit 20 --json tagName --jq '[.[].tagName | select(. != env.CANDIDATE_TAG)] | .[0] // empty')"
           test -n "$previous"
           echo "tag=$previous" >>"$GITHUB_OUTPUT"
