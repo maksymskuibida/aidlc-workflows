@@ -38,6 +38,7 @@ import { publishRelease } from "../../scripts/publish-release.ts";
 
 setDefaultTimeout(NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
 
+const UPSTREAM_ONLY = `\${{ github.repository == 'awslabs/aidlc-workflows' }}`;
 const REPO_ROOT = join(fileURLToPath(new URL("../..", import.meta.url)));
 const STABLE_RELEASE_WORKFLOW = join(REPO_ROOT, ".github", "workflows", "release.yml");
 const PREVIEW_RELEASE_WORKFLOW = join(REPO_ROOT, ".github", "workflows", "preview-release.yml");
@@ -458,12 +459,13 @@ describe("t332 preview publication pipeline", () => {
     // These dependencies use GitHub's default success condition, independent
     // of the planner's skip output, on both schedule and workflow_dispatch.
     expect(jobs.gate).toMatchObject({ needs: "validate" });
-    expect(jobs.gate.if).toBeUndefined();
+    // This fork runs its tests locally, so the test jobs run only upstream.
+    expect(jobs.gate.if).toBe(UPSTREAM_ONLY);
     expect(jobs.full_suite.needs).toEqual(["validate", "gate"]);
-    expect(jobs.full_suite.if).toBeUndefined();
+    expect(jobs.full_suite.if).toBe(UPSTREAM_ONLY);
     expect(jobs.verify).toBeUndefined();
     expect(jobs["native-smoke"].if).toBe(`\${{ !cancelled() && needs.validate.result == 'success' && needs.gate.result == 'success' && needs.validate.outputs.skip != 'true' }}`);
-    expect(jobs.test.if).toBe(`\${{ !cancelled() && needs.validate.result == 'success' }}`);
+    expect(jobs.test.if).toBe(`\${{ !cancelled() && needs.validate.result == 'success' && github.repository == 'awslabs/aidlc-workflows' }}`);
     const step = (job: string, name: string): string => jobs[job].steps!.find((entry) => entry.name === name)!.run!;
     const testScript = step("test", "Require a finished Full Suite");
     const publicationScript = step("release-result", "Require publication or an intentional preview skip");
@@ -530,13 +532,17 @@ describe("t332 preview publication pipeline", () => {
     const { jobs } = Bun.YAML.parse(readFileSync(PREVIEW_RELEASE_WORKFLOW, "utf8")) as {
       jobs: Record<string, Job>;
     };
-    // These two conditions use only JS-compatible operators and cancelled().
+    // These conditions use only JS-compatible operators, cancelled() and github.repository.
     // Pending jobs have no result, so Actions cannot schedule a dependent job.
-    const ready = (name: string, results: Record<string, Result>, cancelled = false): boolean => {
+    const ready = (
+      name: string, results: Record<string, Result>, cancelled = false, repository = "awslabs/aidlc-workflows",
+    ): boolean => {
       const job = jobs[name];
       if (job.needs.some((dependency) => !results[dependency])) return false;
-      const expression = job.if.match(/^\$\{\{([\s\S]+)\}\}$/)![1];
-      return new Function("needs", "cancelled", `return (${expression});`)(results, () => cancelled);
+      // A job name with a hyphen (native-smoke) is not a JS property path.
+      const expression = job.if.match(/^\$\{\{([\s\S]+)\}\}$/)![1]
+        .replace(/needs\.([A-Za-z0-9_-]+)/g, (_, dependency: string) => `needs[${JSON.stringify(dependency)}]`);
+      return new Function("needs", "cancelled", "github", `return (${expression});`)(results, () => cancelled, { repository });
     };
     const buildReady = {
       validate: { result: "success", outputs: { skip: "false" } },
@@ -568,6 +574,28 @@ describe("t332 preview publication pipeline", () => {
         expect(ready("release", { ...reported, "update-from-previous": { result } }), `advisory upgrade=${result}`).toBe(true);
       }
     }
+    // The fork skips the test report and publishes on its own build checks.
+    const fork = "owner/fork";
+    const forkBuilt = {
+      validate: { result: "success", outputs: { skip: "false" } },
+      "native-smoke": { result: "skipped" },
+    };
+    expect(ready("build", forkBuilt, false, fork)).toBe(true);
+    expect(ready("build", forkBuilt)).toBe(false);
+    const forkStaged = {
+      validate: { result: "success" }, "stage-release": { result: "success" },
+      "musl-smoke": { result: "skipped" }, "windows-lifecycle": { result: "skipped" }, "unix-lifecycle": { result: "skipped" },
+    };
+    expect(ready("publish", forkStaged, false, fork)).toBe(true);
+    expect(ready("publish", forkStaged)).toBe(false);
+    expect(ready("publish", { ...forkStaged, "stage-release": { result: "failure" } }, false, fork)).toBe(false);
+    const forkPublished = {
+      validate: { result: "success" }, full_suite: { result: "skipped" }, test: { result: "skipped" },
+      publish: { result: "success" }, "update-from-previous": { result: "skipped" },
+    };
+    expect(ready("release", forkPublished, false, fork)).toBe(true);
+    expect(ready("release", forkPublished)).toBe(false);
+    expect(ready("release", { ...forkPublished, publish: { result: "failure" } }, false, fork)).toBe(false);
   });
 
   test("preview tracks the exact dispatched run and tolerates its failure without changing Full Suite", async () => {
@@ -1443,7 +1471,7 @@ describe("t332 preview publication pipeline", () => {
       needs: "validate",
       "runs-on": "ubuntu-latest",
     });
-    expect(preview.jobs.gate.if).toBeUndefined();
+    expect(preview.jobs.gate.if).toBe(UPSTREAM_ONLY);
     expect(preview.jobs.gate.uses).toBeUndefined();
     expect(preview.jobs.gate.steps?.filter((step) => step.run === "bun run check")).toHaveLength(1);
     expect(preview.jobs.gate.steps?.some((step) => step.run?.includes("tests/run-tests"))).toBe(false);
@@ -1460,7 +1488,7 @@ describe("t332 preview publication pipeline", () => {
     });
     expect(preview.jobs.full_suite.uses).toBeUndefined();
     expect(preview.jobs.full_suite.steps?.[0].env?.SOURCE_SHA).toBe(`\${{ needs.validate.outputs.sha }}`);
-    expect(preview.jobs.full_suite.if).toBeUndefined();
+    expect(preview.jobs.full_suite.if).toBe(UPSTREAM_ONLY);
     expect(preview.jobs.test.needs).toEqual(["validate", "full_suite"]);
     expect(preview.jobs.test.steps?.[0].env?.FULL_SUITE_RESULT).toBe(`\${{ needs.full_suite.outputs.result || 'failure' }}`);
     expect(preview.jobs.test.if).not.toContain("needs.validate.outputs.skip");
