@@ -61,7 +61,8 @@ const COPY_TOOL_DIRS: Record<(typeof HARNESSES)[number], string> = {
 const DISPATCHED = /^(?:aidlc|bun (?:"\$CLAUDE_PROJECT_DIR\/)?\.[a-z]+\/tools\/aidlc\.ts"?) engine (?:hook|adapter) [a-z0-9-]+(?: [a-z0-9-]+)*$/;
 const ADAPTER_FILE = /^bun \.[a-z]+\/hooks\/aidlc-[a-z]+-adapter\.ts [a-z0-9-]+$/;
 const WINDOWS = process.platform === "win32";
-const REPOSITORY = process.env.GITHUB_REPOSITORY || "awslabs/aidlc-workflows";
+// A fork with no stable release of its own updates from upstream's (AIDLC_PREVIOUS_RELEASE_REPOSITORY).
+const REPOSITORY = process.env.AIDLC_PREVIOUS_RELEASE_REPOSITORY || process.env.GITHUB_REPOSITORY || "awslabs/aidlc-workflows";
 const STEP_TIMEOUT_MS = 10 * 60_000;
 const HOOK_TIMEOUT_MS = 2 * 60_000;
 // The whole check ends before the release job's 30-minute limit, so its own
