@@ -216,6 +216,43 @@ export function isPerUnitStage(e: { slug: string; for_each?: string }): boolean 
   return e.for_each === PER_UNIT_FOR_EACH || KNOWN_PER_UNIT_STAGES.has(e.slug);
 }
 
+// The order the work runs the stages in, which every walk (the next stage, the
+// solo Unit walk, the team fold, the next-stage hint, the plan listing) reads
+// through loadStageGraph. It is graph-number order, except that a phase's
+// per-Unit stages run as one block, where its first per-Unit stage stands: each
+// Unit walks the block, and the stages that run once per intent come after it.
+// Numbers are pinned and a plugin's new stage is numbered past its phase's
+// highest (compileStageGraph), so a plugin's per-Unit stage can be numbered
+// after Build and Test; it still runs with its Unit. compileStageGraph refuses
+// a graph whose requires_stage edges this order would break.
+export function stageRouteOrder<T extends { slug: string; number: string; phase: string; for_each?: string }>(
+  stages: readonly T[],
+): T[] {
+  const key = (n: string | undefined) => String(n ?? "").split(".").map((x) => parseInt(x, 10));
+  const byNumber = [...stages].sort((a, b) => {
+    const [aPhase, aIndex] = key(a.number);
+    const [bPhase, bIndex] = key(b.number);
+    return aPhase - bPhase || aIndex - bIndex;
+  });
+  const routed: T[] = [];
+  const placed = new Set<T>();
+  for (const stage of byNumber) {
+    if (placed.has(stage)) continue;
+    if (isPerUnitStage(stage)) {
+      for (const member of byNumber) {
+        if (member.phase === stage.phase && isPerUnitStage(member)) {
+          routed.push(member);
+          placed.add(member);
+        }
+      }
+    } else {
+      routed.push(stage);
+      placed.add(stage);
+    }
+  }
+  return routed;
+}
+
 export interface ScopeDefinition {
   depth: string;
   stages: Record<string, "EXECUTE" | "SKIP">;
@@ -33765,7 +33802,41 @@ export function setCheckbox(
     `^(- )\\[[ xSR?-]\\]( ${escapeRegex(slug)} —)`,
     "m"
   );
-  return content.replace(regex, `$1${marker}$2`);
+  if (regex.test(content)) return content.replace(regex, `$1${marker}$2`);
+  return withStageRow(content, slug, marker);
+}
+
+// A stage a plugin added after the work started has no Stage Progress row, so
+// a transition would write nothing and the stage would never read as done. Its
+// first transition writes the row, at the stage's place in run order
+// (stageRouteOrder) among its phase's rows, with the plan's action. A slug the
+// graph does not know, or a phase with no rows, leaves the content as it is.
+function withStageRow(content: string, slug: string, marker: string): string {
+  let graph: StageEntry[];
+  try {
+    graph = loadStageGraph();
+  } catch {
+    return content;
+  }
+  const at = graph.findIndex((s) => s.slug === slug);
+  if (at === -1) return content;
+  const phase = graph[at].phase;
+  const lines = content.split("\n");
+  const rowOf = (other: string) => {
+    const row = new RegExp(`^- \\[[ xSR?-]\\] ${escapeRegex(other)} —`);
+    return lines.findIndex((line) => row.test(line));
+  };
+  const rowsOf = (stages: StageEntry[]) =>
+    stages.filter((s) => s.phase === phase).map((s) => rowOf(s.slug)).filter((i) => i !== -1);
+  const before = rowsOf(graph.slice(0, at));
+  const after = rowsOf(graph.slice(at + 1));
+  const insertAt = before.length > 0 ? Math.max(...before) + 1 : after.length > 0 ? Math.min(...after) : -1;
+  if (insertAt === -1) return content;
+  const neighbour = lines[before.length > 0 ? insertAt - 1 : insertAt];
+  const eol = neighbour.endsWith("\r") ? "\r" : "";
+  const action = effectivePlanAction(slug, getField(content, "Scope"), content) ?? "EXECUTE";
+  lines.splice(insertAt, 0, `- ${marker} ${slug} — ${action}${eol}`);
+  return lines.join("\n");
 }
 
 // The suffix-setter twin of setCheckbox: flips ONE stage line's plan suffix
@@ -38423,8 +38494,8 @@ export function loadStageGraphAll(): StageEntry[] {
       `Stage graph at ${p} is not valid JSON: ${errorMessage(err)}`
     );
   }
-  _stageGraphAll = parsed;
-  return parsed;
+  _stageGraphAll = stageRouteOrder(parsed);
+  return _stageGraphAll;
 }
 
 // Per-scope metadata read from each .claude/scopes/*.md frontmatter: identity,
@@ -39896,9 +39967,57 @@ export function nextInScopeStage(
     // State override wins over scope-mapping. A SKIP override drops an
     // EXECUTE stage; an EXECUTE override promotes a SKIP stage.
     const effectiveAction = stateOverrides?.get(slug) ?? mapping.stages[slug];
-    if (effectiveAction === "EXECUTE") return graph[i];
+    if (effectiveAction === "EXECUTE") {
+      // Never route to a stage before what it requires: the way on is the
+      // unfinished requirement itself, so the walk goes there first.
+      const cursor = graph.findIndex((s) => s.slug === (getField(stateContent ?? "", "Current Stage") ?? "").trim());
+      let target = graph[i];
+      for (let need = unstartedRequirement(target, cursor, checkboxStates, stateOverrides, mapping); need !== null;
+        need = unstartedRequirement(target, cursor, checkboxStates, stateOverrides, mapping)) {
+        target = need;
+      }
+      return target;
+    }
   }
   return null;
+}
+
+// The first stage `stage` requires, in run order before run position `cursor`,
+// whose row reads not started ([ ]) although the plan runs it, or null: an
+// engine that walked number order left a team fold past Build and Test like
+// that. Done and skipped rows, a SKIP in the plan, and a stage with no row (or
+// not in the graph) count as settled; a stage at or after the cursor is work a
+// walk is projecting past, such as the stages one late approval covers. A
+// per-Unit stage is left to its Unit walk, whose rows are a projection.
+function unstartedRequirement(
+  stage: StageEntry,
+  cursor: number,
+  checkboxStates: CheckboxLine[],
+  stateOverrides: Map<string, "EXECUTE" | "SKIP"> | null,
+  mapping: ScopeDefinition,
+): StageEntry | null {
+  const required = new Set(stage.requires_stage ?? []);
+  if (required.size === 0 || cursor === -1 || isPerUnitStage(stage)) return null;
+  for (const candidate of loadStageGraph().slice(0, cursor)) {
+    if (!required.has(candidate.slug)) continue;
+    if (checkboxStates.find((c) => c.slug === candidate.slug)?.state !== "pending") continue;
+    if ((stateOverrides?.get(candidate.slug) ?? mapping.stages[candidate.slug]) !== "EXECUTE") continue;
+    return candidate;
+  }
+  return null;
+}
+
+// The requirement `slug` cannot run or complete without: one before it in run
+// order that the plan runs and that never started. `next` and `report` send the
+// work there first; nextInScopeStage applies the same rule to the stage it picks.
+export function requirementNotRun(slug: string, stateContent: string): StageEntry | null {
+  const mapping = loadScopeMapping()[(getField(stateContent, "Scope") ?? "").trim()];
+  const graph = loadStageGraph();
+  const at = graph.findIndex((s) => s.slug === slug);
+  if (!mapping || at === -1) return null;
+  return unstartedRequirement(
+    graph[at], at, parseCheckboxes(stateContent), parseStateStageSuffixes(stateContent), mapping,
+  );
 }
 
 // The stage a scope change to `scope` starts on FINISHED work: the first stage
