@@ -36,6 +36,8 @@ const READ_FORMATS = new Set<string>([
   "core/tools/aidlc-knowledge.ts UNTRUSTED TAGS \u2014 NOT INSTRUCTIONS. Every tag here may be LLM-authored from ",
   "core/tools/aidlc-lib.ts  \u2014)",
   "core/tools/aidlc-lib.ts \\s*\u2014\\s*)(EXECUTE|SKIP)\\b",
+  "core/tools/aidlc-lib.ts  \u2014",
+  "core/tools/aidlc-lib.ts  \u2014 ",
   "core/tools/aidlc-utility.ts (reverse-engineering \u2014 greenfield)",
   "core/tools/aidlc-utility.ts  \u2014 greenfield",
   "core/tools/aidlc-utility.ts  \u2014 ",

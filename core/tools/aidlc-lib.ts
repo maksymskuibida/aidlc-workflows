@@ -3,6 +3,8 @@ import { lockFolderHeldGiveUpMs, lockFolderHeldLine } from "./aidlc-lock-line.ts
 import { reviewManifestForms } from "./aidlc-review-manifest.ts";
 import { withoutLearnedDate } from "./aidlc-learned-date.ts";
 import { KIRO_SESSION_DIR_RE, kiroChatRecordPaths } from "./aidlc-kiro-chat-record.ts";
+import { isPerUnitStage, stageRouteOrder, unstartedRequirement } from "./aidlc-stage-route.ts";
+export { isPerUnitStage, KNOWN_PER_UNIT_STAGES, PER_UNIT_FOR_EACH, stageRouteOrder } from "./aidlc-stage-route.ts";
 import {
   boundedGitMetadataText,
   canonicalPathKey,
@@ -354,33 +356,6 @@ export interface StageEntry {
     category?: string;
     matches?: string;
   }>;
-}
-
-// The per-unit marker carried by the Construction stages that run once per
-// Unit of Work. It lives on the stage's `for_each` field (stage frontmatter,
-// compiled onto the GraphStage and into stage-graph.json). The canonical
-// 5-stage set (nfr-requirements, nfr-design, functional-design,
-// infrastructure-design, code-generation) is the defensive cross-check; the
-// node's own `for_each` is the source of truth so a future per-unit stage is
-// picked up without editing this file. Exported so both the runtime resolver
-// (isPerUnit in aidlc-orchestrate.ts) and the cost summary (gridCostSummary
-// below) resolve per-unit identically.
-export const PER_UNIT_FOR_EACH = "unit-of-work";
-export const KNOWN_PER_UNIT_STAGES: ReadonlySet<string> = new Set([
-  "nfr-requirements",
-  "nfr-design",
-  "functional-design",
-  "infrastructure-design",
-  "code-generation",
-]);
-
-// True when a stage runs once per Unit of Work. Reads the node's own
-// `for_each` marker (source of truth); the known-set membership is a defensive
-// cross-check so a typo'd marker on one of the five canonical stages still
-// resolves per-unit. Structural param so both a GraphStage and a bare
-// {slug, for_each} record satisfy it.
-export function isPerUnitStage(e: { slug: string; for_each?: string }): boolean {
-  return e.for_each === PER_UNIT_FOR_EACH || KNOWN_PER_UNIT_STAGES.has(e.slug);
 }
 
 export interface ScopeDefinition {
@@ -35951,7 +35926,37 @@ export function setCheckbox(
     `^(- )\\[[ xSR?-]\\]( ${escapeRegex(slug)} —)`,
     "m"
   );
-  return content.replace(regex, `$1${marker}$2`);
+  if (regex.test(content)) return content.replace(regex, `$1${marker}$2`);
+  // A stage a plugin added after the work started has no Stage Progress row, so
+  // a transition would write nothing and the stage would never read as done. Its
+  // first transition writes the row, at the stage's place in run order
+  // (stageRouteOrder) among its phase's rows, with the plan's action. A slug the
+  // graph does not know, or a phase with no rows, leaves the content as it is.
+  let graph: StageEntry[];
+  try {
+    graph = loadStageGraph();
+  } catch {
+    return content;
+  }
+  const at = graph.findIndex((s) => s.slug === slug);
+  if (at === -1) return content;
+  const phase = graph[at].phase;
+  const lines = content.split("\n");
+  const rowOf = (other: string) => {
+    const row = new RegExp(`^- \\[[ xSR?-]\\] ${escapeRegex(other)} —`);
+    return lines.findIndex((line) => row.test(line));
+  };
+  const rowsOf = (stages: StageEntry[]) =>
+    stages.filter((s) => s.phase === phase).map((s) => rowOf(s.slug)).filter((i) => i !== -1);
+  const before = rowsOf(graph.slice(0, at));
+  const after = rowsOf(graph.slice(at + 1));
+  const insertAt = before.length > 0 ? Math.max(...before) + 1 : after.length > 0 ? Math.min(...after) : -1;
+  if (insertAt === -1) return content;
+  const neighbour = lines[before.length > 0 ? insertAt - 1 : insertAt];
+  const eol = neighbour.endsWith("\r") ? "\r" : "";
+  const action = effectivePlanAction(slug, getField(content, "Scope"), content) ?? "EXECUTE";
+  lines.splice(insertAt, 0, `- ${marker} ${slug} — ${action}${eol}`);
+  return lines.join("\n");
 }
 
 // The suffix-setter twin of setCheckbox: flips ONE stage line's plan suffix
@@ -38834,8 +38839,8 @@ export function loadStageGraphAll(): StageEntry[] {
       `Stage graph at ${p} is not valid JSON: ${errorMessage(err)}`
     );
   }
-  _stageGraphAll = parsed;
-  return parsed;
+  _stageGraphAll = stageRouteOrder(parsed);
+  return _stageGraphAll;
 }
 
 // Per-scope metadata read from each .claude/scopes/*.md frontmatter: identity,
@@ -40317,7 +40322,17 @@ export function nextInScopeStage(
     // State override wins over scope-mapping. A SKIP override drops an
     // EXECUTE stage; an EXECUTE override promotes a SKIP stage.
     const effectiveAction = stateOverrides?.get(slug) ?? mapping.stages[slug];
-    if (effectiveAction === "EXECUTE") return graph[i];
+    if (effectiveAction === "EXECUTE") {
+      // Never route to a stage before what it requires: the way on is the
+      // unfinished requirement itself, so the walk goes there first.
+      const cursor = graph.findIndex((s) => s.slug === (getField(stateContent ?? "", "Current Stage") ?? "").trim());
+      let target = graph[i];
+      for (let need = unstartedRequirement(target, cursor, graph, checkboxStates, stateOverrides, mapping); need !== null;
+        need = unstartedRequirement(target, cursor, graph, checkboxStates, stateOverrides, mapping)) {
+        target = need;
+      }
+      return target;
+    }
   }
   return null;
 }
