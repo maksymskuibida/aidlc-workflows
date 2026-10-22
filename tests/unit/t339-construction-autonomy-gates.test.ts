@@ -65,7 +65,11 @@ function setup(
   project = createTestProject();
   seedStateFile(project, join(import.meta.dir, "../fixtures/state-construction-bolt1.md"));
   const path = seededStateFile(project);
-  const state = readFileSync(path, "utf-8")
+  // The stages before the target are done, as the engine leaves them, so the
+  // target's requirements have run.
+  const seeded = readFileSync(path, "utf-8");
+  const target = seeded.indexOf(`- [ ] ${stage} — EXECUTE`);
+  const state = (seeded.slice(0, target).replace(/^- \[ \] /gm, "- [x] ") + seeded.slice(target))
     .replace(`- [ ] ${stage} — EXECUTE`, `- [${status === "in-progress" ? "-" : "?"}] ${stage} — EXECUTE`)
     .replace("**Current Stage**: functional-design", `**Current Stage**: ${stage}`)
     .replace("## Runtime State", [
