@@ -190,6 +190,11 @@ function emitForWithProject(
     new RegExp(`^- \\[.\\] ${slug} — EXECUTE`, "m"),
     `- [-] ${slug} — EXECUTE`,
   );
+  // The stages before the target are done, as the engine leaves them, so the
+  // target's requirements have run.
+  const pivoted = readFileSync(state, "utf-8");
+  const at = pivoted.indexOf(`- [-] ${slug} — EXECUTE`);
+  writeFileSync(state, pivoted.slice(0, at).replace(/^- \[[ -]\] /gm, "- [x] ") + pivoted.slice(at));
   const env = (() => {
     const e = { ...process.env };
     delete e.AWS_AIDLC_DEFAULT_SCOPE;

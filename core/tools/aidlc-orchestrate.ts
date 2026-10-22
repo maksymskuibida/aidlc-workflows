@@ -78,6 +78,7 @@
 // per the tool/agent/human split (routing string-building to an LLM would
 // invert the whole thesis).
 
+import { unstartedRequirement } from "./aidlc-stage-route.ts";
 import {
   createHash,
   randomBytes,
@@ -336,6 +337,8 @@ import {
   maximalAttemptEvents,
   resolveReviewClass,
   loadScopeMapping,
+  loadStageGraph,
+  parseStateStageSuffixes,
   scopeGuardPolicyDefault,
   nextInScopeStage,
   setStageSuffix,
@@ -12373,6 +12376,16 @@ function routeNext(agentArgs: string[], projectDir: string | undefined): void {
     return;
   }
 
+  // A stage the current one requires is behind the cursor and never ran:
+  // that one runs first, the same way.
+  if (currentState !== "completed" && currentState !== "skipped") {
+    const owed = requirementNotRunLine(stateContent, currentSlug, scope);
+    if (owed) {
+      emit(printDirective(owed));
+      return;
+    }
+  }
+
   // If the current stage is still in-flight (pending / in-progress /
   // awaiting-approval / revising), the next move is normally to run THAT stage
   // — the workflow has not yet completed it. A plan-SKIP mismatch is recovered
@@ -12463,11 +12476,10 @@ function routeNext(agentArgs: string[], projectDir: string | undefined): void {
             applySettledSwarmShape(directive);
           }
           // The one late question is shown again as the same one question.
-          const together = approveTogetherFor(pd, stateContent, currentNode, recordPrefix, codekbCtx);
-          if (together) directive.approve_together = together;
+          applyApproveTogether(directive, pd, stateContent, currentNode, recordPrefix, codekbCtx);
           // A joint late approval stays the one question it is: the report
           // would show the gate as this stage's alone.
-          if (!together && gateOwesItsReport(pd, stateContent, currentNode, scope)) {
+          if (!directive.approve_together && gateOwesItsReport(pd, stateContent, currentNode, scope)) {
             const step = printDirective(
               `The ${currentNode.name} gate's reviewed work changed after its review: run \`${aidlcToolInvocation("orchestrate")} ` +
                 `report --stage ${shellArg(currentSlug)} --result awaiting-approval\` and show the gate with what it returns.`,
@@ -14201,6 +14213,25 @@ function approveTogetherFor(
   };
 }
 
+// The one late question on `directive`, when there is one. Approving it moves
+// the work past the last stage it covers, so its Approve option names the stage
+// after that one, as the reply to report --result awaiting-approval does.
+function applyApproveTogether(
+  directive: RunStageDirective,
+  projectDir: string,
+  stateContent: string | null,
+  node: GraphStage,
+  recordPrefix: string | null,
+  codekbCtx: CodekbCtx,
+): void {
+  const together = approveTogetherFor(projectDir, stateContent, node, recordPrefix, codekbCtx);
+  if (!together) return;
+  directive.approve_together = together;
+  const last = together.stages.at(-1)?.slug ?? node.slug;
+  const next = nextInScopeStage(last, getField(stateContent ?? "", "Scope") ?? "", stateContent ?? undefined);
+  directive.next_stage = next ? next.name : null;
+}
+
 // Emit ONE iteration of a per-unit Construction stage. The engine owns the
 // for_each loop here: it resolves the next uncovered unit, substitutes the real
 // unit name for {unit-name} in every path, and suppresses the gate for EVERY
@@ -14394,8 +14425,7 @@ function emitPerUnitRunStage(
       directive.build_settled = true;
     }
     // Unit-major with checkpoints off: the stages still waiting are one question.
-    const together = approveTogetherFor(projectDir, stateContent, node, recordPrefix, codekbCtx);
-    if (together) directive.approve_together = together;
+    applyApproveTogether(directive, projectDir, stateContent, node, recordPrefix, codekbCtx);
     if (stateContent !== null) {
       const preflight = preflightDirective(
         projectDir,
@@ -18800,6 +18830,46 @@ function checkboxForSlug(
   return parseCheckboxes(stateContent).find((c) => c.slug === slug);
 }
 
+// The requirement `slug` cannot run or complete without: one before it in run
+// order that the plan runs and that never started. `next` and `report` send the
+// work there first; nextInScopeStage applies the same rule (unstartedRequirement)
+// to the stage it picks.
+function requirementNotRun(slug: string, stateContent: string): StageEntry | null {
+  const mapping = loadScopeMapping()[(getField(stateContent, "Scope") ?? "").trim()];
+  const graph = loadStageGraph();
+  const at = graph.findIndex((s) => s.slug === slug);
+  if (!mapping || at === -1) return null;
+  return unstartedRequirement(
+    graph[at], at, graph, parseCheckboxes(stateContent), parseStateStageSuffixes(stateContent), mapping,
+  );
+}
+
+// The one line for a stage whose requirement never ran, or null: what it needs
+// and the redo jump that runs it now and comes back, as for Reverse
+// Engineering owed behind the cursor. requirementNotRun owns the rule.
+function requirementNotRunLine(stateContent: string, slug: string, scope: string): string | null {
+  const owed = requirementNotRun(slug, stateContent);
+  const node = nodeForSlug(slug);
+  if (!owed || !node) return null;
+  return `${node.name} needs ${owed.name}, which has not run. Run \`${aidlcToolInvocation("jump")} execute --target ${owed.slug} ` +
+    `--direction redo --scope ${scopeArg(scope)}\` to run ${owed.name} now (finished stages stay finished, and the workflow ` +
+    `returns to ${node.name} after it), then re-run \`next\` to continue.`;
+}
+
+// Work started before a plugin added a stage has no Stage Progress row for it.
+// A transition writes the row (setCheckbox), but one an older engine already
+// moved the cursor onto had none written, so its report had nothing to commit.
+// The row is written here first, with the state the cursor gives it.
+function writeReportedStageRow(pd: string, reported: string | undefined): void {
+  const content = loadStateFileIfPresent(pd);
+  if (!content) return;
+  const current = getField(content, "Current Stage")?.trim() ?? "";
+  const slug = reported?.trim() || current;
+  if (!slug || checkboxForSlug(content, slug) || !nodeForSlug(slug)) return;
+  if (effectivePlanAction(slug, getField(content, "Scope"), content) !== "EXECUTE") return;
+  spawnState(pd, ["checkbox", `${slug}=${slug === current ? "in-progress" : "pending"}`]);
+}
+
 // The refusal for a skip report that does not name the step in progress. It
 // names the one step (and unit) a skip is accepted for right now and how to
 // continue, in the project's terms, so the conductor neither retries blind
@@ -19443,6 +19513,7 @@ function handleReport(args: string[], projectDir: string | undefined): void {
   }
 
   const pd = resolveProjectDir(projectDir);
+  writeReportedStageRow(pd, flags.stage);
   const stateContent = loadStateFileIfPresent(pd);
   if (!stateContent) {
     emit({
@@ -19497,6 +19568,13 @@ function handleReport(args: string[], projectDir: string | undefined): void {
       message: `Stage "${slug}" is not present in the state file - cannot commit its transition.`,
     });
     return;
+  }
+  if (flags.result === "awaiting-approval" || flags.result === "approved" || flags.result === "completed") {
+    const owed = requirementNotRunLine(stateContent, slug, scope);
+    if (owed) {
+      emit(errorDirective(owed));
+      return;
+    }
   }
 
   // A stage-authored conditional skip is a routed lifecycle outcome, not a
@@ -20836,8 +20914,7 @@ function handleContinue(line: string[], projectDir: string | undefined): void {
   if (payload.t === true) directive.build_settled = true;
   if (payload.Q === true) directive.questions_only = true;
   if (payload.m === true) {
-    const together = approveTogetherFor(pd, liveState, node, engineRelativeRecordDir(pd), codekbCtxFor(pd));
-    if (together) directive.approve_together = together;
+    applyApproveTogether(directive, pd, liveState, node, engineRelativeRecordDir(pd), codekbCtxFor(pd));
   }
   if (payload.j !== undefined && payload.u !== null && liveState !== null) {
     const unit = payload.u;

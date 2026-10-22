@@ -120,6 +120,21 @@ it runs once after all five Construction `for_each` stages have iterated
 across Units, consuming their aggregated outputs. No explicit `fan_in` or
 aggregation field — graph traversal figures it out.
 
+**Per-Unit stages run as one block.** The engine walks the stages in run
+order: number order, except that a phase's per-Unit stages run together where
+its first per-Unit stage stands. Each Unit walks the whole block, every block
+approval comes before the first once-per-intent stage after it, and the next
+stage, the team fold after the last Unit and the gate's "Continue to" name all
+follow that order. A plugin's new stage is numbered past its phase's highest
+number, so a plugin stage that runs per Unit after Code Generation is numbered
+after Build and Test and CI Pipeline, and still runs with its Unit. A per-Unit
+stage cannot require a stage that runs once per intent after the block starts;
+the compile refuses that edge. A stage never runs or completes while a stage it
+requires, one the plan runs, has not started: the next stage goes to that
+requirement first, and when the work is already on the stage, `next` and its
+gate name the requirement and the jump that runs it. A requirement that is
+done, skipped, or not in the plan counts as settled.
+
 ### `summary_confirmation`
 
 Optional enum controlling the deterministic pre-generation checkpoint for a
