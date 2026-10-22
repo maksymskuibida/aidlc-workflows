@@ -4,6 +4,7 @@ import { reviewManifestForms } from "./aidlc-review-manifest.ts";
 import { withoutLearnedDate } from "./aidlc-learned-date.ts";
 import { claimedCheckoutReopens } from "./aidlc-unit-landing.ts";
 import { KIRO_SESSION_DIR_RE, kiroChatRecordPaths } from "./aidlc-kiro-chat-record.ts";
+import { unstartedRequirement } from "./aidlc-stage-route.ts";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, closeSync, constants as fsConstants, cpSync, type Dirent, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
@@ -38210,7 +38211,18 @@ export function nextInScopeStage(
     // State override wins over scope-mapping. A SKIP override drops an
     // EXECUTE stage; an EXECUTE override promotes a SKIP stage.
     const effectiveAction = stateOverrides?.get(slug) ?? mapping.stages[slug];
-    if (effectiveAction === "EXECUTE") return graph[i];
+    if (effectiveAction === "EXECUTE") {
+      // Never route to a stage before what it requires: the way on is the
+      // unfinished requirement itself, so the walk goes there first.
+      const cursor = graph.findIndex((s) => s.slug === (getField(stateContent ?? "", "Current Stage") ?? "").trim());
+      let target = graph[i];
+      for (let need = unstartedRequirement(target, cursor, graph, checkboxStates, stateOverrides, mapping, isPerUnitStage);
+        need !== null;
+        need = unstartedRequirement(target, cursor, graph, checkboxStates, stateOverrides, mapping, isPerUnitStage)) {
+        target = need;
+      }
+      return target;
+    }
   }
   return null;
 }

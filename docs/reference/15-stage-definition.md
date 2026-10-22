@@ -130,7 +130,14 @@ plugin's new stage is numbered past its phase's highest number, so a plugin
 stage that runs per Unit after Code Generation is numbered after Build and Test
 and CI Pipeline, and still runs with its Unit. A per-Unit stage cannot require
 a stage that runs once per intent after the block starts; the compile refuses
-that edge.
+that edge. A stage after the block never runs or
+completes while a stage it requires, one that runs once after the block and
+that the plan runs, has not started: the next stage goes to that requirement
+first, and when the work is already on the stage, `next` and its gate name the
+requirement and the jump that runs it. A requirement that is done, skipped, or
+not in the plan counts as settled. A stage the work left behind anywhere else
+(a scope change's, or Reverse Engineering left out at the plan pick) keeps the
+rules it has.
 
 ### `summary_confirmation`
 
