@@ -13066,11 +13066,10 @@ function routeNext(agentArgs: string[], projectDir: string | undefined): void {
             applySettledSwarmShape(directive);
           }
           // The one late question is shown again as the same one question.
-          const together = approveTogetherFor(pd, stateContent, currentNode, recordPrefix, codekbCtx);
-          if (together) directive.approve_together = together;
+          applyApproveTogether(directive, pd, stateContent, currentNode, recordPrefix, codekbCtx);
           // A joint late approval stays the one question it is: the report
           // would show the gate as this stage's alone.
-          if (!together && gateOwesItsReport(pd, stateContent, currentNode, scope)) {
+          if (!directive.approve_together && gateOwesItsReport(pd, stateContent, currentNode, scope)) {
             const step = printDirective(
               `The ${currentNode.name} gate's reviewed work changed after its review: run \`${aidlcToolInvocation("orchestrate")} ` +
                 `report --stage ${shellArg(currentSlug)} --result awaiting-approval\` and show the gate with what it returns.`,
@@ -14810,6 +14809,25 @@ function approveTogetherFor(
   };
 }
 
+// The one late question on `directive`, when there is one. Approving it moves
+// the work past the last stage it covers, so its Approve option names the stage
+// after that one, as the reply to report --result awaiting-approval does.
+function applyApproveTogether(
+  directive: RunStageDirective,
+  projectDir: string,
+  stateContent: string | null,
+  node: GraphStage,
+  recordPrefix: string | null,
+  codekbCtx: CodekbCtx,
+): void {
+  const together = approveTogetherFor(projectDir, stateContent, node, recordPrefix, codekbCtx);
+  if (!together) return;
+  directive.approve_together = together;
+  const last = together.stages.at(-1)?.slug ?? node.slug;
+  const next = nextInScopeStage(last, getField(stateContent ?? "", "Scope") ?? "", stateContent ?? undefined);
+  directive.next_stage = next ? next.name : null;
+}
+
 // Emit ONE iteration of a per-unit Construction stage. The engine owns the
 // for_each loop here: it resolves the next uncovered unit, substitutes the real
 // unit name for {unit-name} in every path, and suppresses the gate for EVERY
@@ -14997,8 +15015,7 @@ function emitPerUnitRunStage(
       directive.build_settled = true;
     }
     // Unit-major with checkpoints off: the stages still waiting are one question.
-    const together = approveTogetherFor(projectDir, stateContent, node, recordPrefix, codekbCtx);
-    if (together) directive.approve_together = together;
+    applyApproveTogether(directive, projectDir, stateContent, node, recordPrefix, codekbCtx);
     if (stateContent !== null) {
       const preflight = preflightDirective(
         projectDir,
@@ -21784,8 +21801,7 @@ function handleContinue(line: string[], projectDir: string | undefined): void {
   if (payload.t === true) directive.build_settled = true;
   if (payload.Q === true) directive.questions_only = true;
   if (payload.m === true) {
-    const together = approveTogetherFor(pd, liveState, node, engineRelativeRecordDir(pd), codekbCtxFor(pd));
-    if (together) directive.approve_together = together;
+    applyApproveTogether(directive, pd, liveState, node, engineRelativeRecordDir(pd), codekbCtxFor(pd));
   }
   if (payload.j !== undefined && payload.u !== null && liveState !== null) {
     const unit = payload.u;
