@@ -247,7 +247,9 @@ Pinning records one exact candidate OID and attempt generation. Evidence is read
 with git object plumbing, not by merging or creating a worktree:
 
 - required Unit artifacts;
-- `UNIT_COMPLETED` receipts for active stages;
+- `UNIT_COMPLETED` receipts for active stages (a step skipped for the Unit
+  counts by its `UNIT_SKIPPED` receipt and needs no artifacts, review, gate or
+  plan approval);
 - team gate approvals at the claim rhythm;
 - required reviewer `READY` verdicts;
 - Plan Approval fingerprint and explicit approval;
