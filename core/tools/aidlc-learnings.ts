@@ -121,6 +121,7 @@ import {
   listField,
   parseMemoryEntries,
   readAllAuditShards,
+  readApplicableTeamUnitScopeStamp,
   readStateFile,
   relativeMemoryPath,
   relativeRecordDir,
@@ -135,6 +136,7 @@ import {
   withAuditLock,
   writeFileAtomic,
   harnessDir,
+  teamUnitMemoryPath,
 } from "./aidlc-lib.ts";
 import { constructionCheckpointKind, resolveConstructionCheckpoint } from "./aidlc-construction-checkpoints.ts";
 import { SLUG_RE } from "./aidlc-stage-schema.ts";
@@ -394,6 +396,21 @@ function resolveMemoryPath(
   );
 }
 
+// In a team-owned Unit's claimed checkout, a per-Unit stage's diary is the
+// Unit's own (teamUnitMemoryPath), the one the run-stage directive named.
+function teamUnitDiary(
+  projectDir: string,
+  slug: string,
+  stateContent: string,
+  intent?: string,
+  space?: string
+): string | null {
+  const stage = findStageBySlug(slug);
+  const scope = readApplicableTeamUnitScopeStamp(projectDir, stateContent);
+  if (!stage || !scope) return null;
+  return teamUnitMemoryPath(stage, scope.unit, stateContent, relativeRecordDir(projectDir, intent, space));
+}
+
 // A Construction checkpoint the person approves covers every stage its Unit
 // walked, while Current Stage waits on the first one until every Unit is past
 // it. A stage of the checkpoint now at its approval (ready, not yet approved)
@@ -473,7 +490,8 @@ function handleSurface(args: string[], projectDir: string): void {
   const atCheckpoint = checkpointUnits(projectDir, stateContent, slug);
   assertActiveStage(stateContent, slug, atCheckpoint);
 
-  const memRel = resolveMemoryPath(projectDir, slug, pinnedIntent, space);
+  const unitDiary = teamUnitDiary(projectDir, slug, stateContent, pinnedIntent, space);
+  const memRel = unitDiary ?? resolveMemoryPath(projectDir, slug, pinnedIntent, space);
   const memAbs = join(projectDir, memRel);
 
   // memory.md may be absent (the per-stage lifecycle owns deterministic
@@ -485,13 +503,13 @@ function handleSurface(args: string[], projectDir: string): void {
   const unit = atCheckpoint.length === 1 ? atCheckpoint[0] : null;
   const entries = parseMemoryEntries(raw).filter((e) => unit === null || e.unit === undefined || e.unit === unit);
 
-  // memory_path always ends `<prefix>/<phase>/<stageSlug>/memory.md` (see
+  // A stage-level memory_path always ends `<prefix>/<phase>/<stageSlug>/memory.md` (see
   // relativeMemoryPath), so the phase is the third-from-last segment regardless
   // of prefix shape: the per-intent record dir, the bare space prefix, or the
   // legacy flat `aidlc-docs` root all share that tail. Indexing from the front
   // assumed the flat layout and yielded "spaces" under the workspace prefix.
   const segs = memRel.split("/");
-  const phase = segs.at(-3) ?? "";
+  const phase = unitDiary ? "construction" : segs.at(-3) ?? "";
 
   const candidates: SurfaceCandidate[] = [];
   const parked: SurfaceParkedQuestion[] = [];

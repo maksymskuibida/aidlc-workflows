@@ -462,6 +462,7 @@ import {
   readUnitSourceManifest,
   unitPlainName,
   unitSkippedItsCode,
+  teamUnitMemoryPath,
 } from "./aidlc-lib.ts";
 import { reviewRecoverySpentMessage } from "./aidlc-log.ts";
 import {
@@ -6239,8 +6240,8 @@ function resolveScope(
 // the workspace root; the engine only joins them to projectDir for deterministic
 // diary bootstrap. Re-rooting remains a pure prefix swap, not a route through
 // the absolute projectDir-keyed state helpers.
-// Per-unit Construction stages embed a {unit-name} segment that a later engine
-// change resolves; until then the bare phase/slug form is the faithful derivation.
+// A per-Unit stage keeps the one stage-level diary, its notes tagged by Unit,
+// except a team-owned Unit's, which keeps its own (teamUnitMemoryPath).
 function memoryPathFor(phase: string, slug: string, recordPrefix: string | null): string {
   const prefix = recordPrefix ?? relativeSpaceRecordPrefix();
   return `${prefix}/${phase}/${slug}/memory.md`;
@@ -7372,7 +7373,9 @@ function buildRunStageDirective(
     mode: node.mode as RunStageDirective["mode"],
     inline_context_paths: inlineContext.paths,
     gate: computeGate(node, scope, stateContent),
-    memory_path: memoryPathFor(node.phase, node.slug, recordPrefix),
+    memory_path:
+      teamUnitMemoryPath(node, unit === UNIT_NAME_PLACEHOLDER ? null : unit, stateContent, recordPrefix) ??
+      memoryPathFor(node.phase, node.slug, recordPrefix),
     consumes: present,
     produces: resolveProduces(
       node,

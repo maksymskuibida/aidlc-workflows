@@ -30726,6 +30726,22 @@ export function relativeMemoryPath(phase: string, stageSlug: string, recordPrefi
   return `${prefix}/${phase}/${stageSlug}/memory.md`;
 }
 
+// Under Unit Ownership: team a Unit's per-Unit stage runs in the Unit's claimed
+// checkout, which lands only the Unit's own record tree (pin refuses a
+// stage-level diary), so its diary is `<prefix>/construction/<unit>/<stage>/memory.md`,
+// the path a per-Unit wave entry already writes. Null when the stage-level
+// diary applies. The run-stage directive and the learnings step both read it here.
+export function teamUnitMemoryPath(
+  stage: { slug: string; for_each?: string },
+  unit: string | null,
+  stateContent: string | null,
+  recordPrefix?: string | null,
+): string | null {
+  if (!unit || !isTeamUnitOwnership(stateContent) || !isPerUnitStage(stage)) return null;
+  const prefix = recordPrefix ?? relativeSpaceRecordPrefix();
+  return `${prefix}/construction/${unit}/${stage.slug}/memory.md`;
+}
+
 // `<root>/<phase>/<stageSlug>/memory.md` — the absolute diary path for a stage.
 export function memoryFilePath(projectDir: string, phase: string, stageSlug: string, intent?: string, space?: string): string {
   return join(docsRoot(projectDir, intent, space), phase, stageSlug, "memory.md");
