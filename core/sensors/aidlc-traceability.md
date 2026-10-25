@@ -35,7 +35,9 @@ Deterministic element-level verification of each stage's JSON coverage table:
 4. Resolves upstream IDs from the authored artifacts and fails closed when the
    expected source is missing or yields no IDs.
 5. Verifies deterministic targets where possible: stories, Unit mappings,
-   business rules, and workspace-relative code paths.
+   business rules, and workspace-relative code paths. A Functional Design Unit
+   whose kind writes no `rules.md` (a `ui` Unit) names the design file that
+   covers each row instead of a business rule.
 6. Derives functional-design orphans from `rules.md` rather than
    trusting only the self-reported `reverse` array.
 

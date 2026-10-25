@@ -1,7 +1,10 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
+  artifactFilename,
   errorMessage,
+  filterProducesByKind,
+  findStageBySlug,
   getField,
   parseCheckboxes,
   parseStateStageSuffixes,
@@ -49,6 +52,7 @@ interface UnitContext {
   unitName: string;
   units: string[];
   unitIds: Map<string, string>;
+  unitKind?: string | null;
 }
 
 interface UpstreamResolution {
@@ -387,8 +391,37 @@ function resolveUnitContext(
       unitName,
       units,
       unitIds: unitIdMap(join(docsDir, "inception", "units-generation", "unit-of-work.md"), units),
+      unitKind: dag.state === "ok" ? dag.unitKinds?.get(unitName) ?? null : null,
     },
   };
+}
+
+// Whether a target names `file` as a whole file name (`functional-spec.md`,
+// `functional-spec.md#cart`), not as part of a longer one.
+function namesFile(target: string, file: string): boolean {
+  const escaped = file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\w.-])${escaped}($|[^\\w.-])`).test(target);
+}
+
+// The Functional Design files a Unit of this kind writes, when its kind gives
+// it no rules.md (a `ui` Unit): its rows then trace to these files instead of
+// to BRx.y rules. Null when rules.md applies, or the stage graph is unreadable
+// (a source checkout), which keeps the rules check.
+function designFilesWithoutRules(unitKind: string | null): string[] | null {
+  let stage: ReturnType<typeof findStageBySlug>;
+  try {
+    stage = findStageBySlug("functional-design");
+  } catch {
+    return null;
+  }
+  if (!stage) return null;
+  const names = filterProducesByKind(
+    stage.produces_kinds,
+    [...(stage.produces ?? []), ...(stage.optional_produces ?? [])],
+    unitKind,
+  );
+  if (names.includes("rules")) return null;
+  return names.filter((name) => name !== "traceability").map(artifactFilename);
 }
 
 function addSource(result: UpstreamResolution, source: { ids: Set<string>; reason?: string }): Set<string> {
@@ -649,7 +682,22 @@ function verifyTargets(
 
   if (stage === "functional-design" && docsDir) {
     const unit = upstream.unitContext?.unitName ?? extractUnitName(outputPath);
-    if (unit !== null) {
+    const designFiles = unit ? designFilesWithoutRules(upstream.unitContext?.unitKind ?? null) : null;
+    if (unit && designFiles) {
+      const designDir = constructionDir(docsDir, unit, "functional-design");
+      for (const entry of okEntries) {
+        const target = entry.target ?? "";
+        const named = designFiles.filter((file) => namesFile(target, file));
+        if (named.length === 0) {
+          invalidTargets.push(`${entry.id}: target must name the Functional Design file that covers it: ${designFiles.join(", ")}`);
+        }
+        for (const file of named) {
+          if (!existsSync(join(designDir, file))) {
+            invalidTargets.push(`${entry.id}: target ${file} does not exist in this Unit's functional-design`);
+          }
+        }
+      }
+    } else if (unit !== null) {
       const brPath = join(constructionDir(docsDir, unit, "functional-design"), "rules.md");
       const rules = idsFromFile(brPath, [ID_PATTERNS.BR], "rules.md");
       if (rules.reason) reasons.push(rules.reason);
