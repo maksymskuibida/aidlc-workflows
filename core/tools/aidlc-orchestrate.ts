@@ -12683,6 +12683,18 @@ function teamUnitStageApplies(
     applicableProduceNames(stage, unitKind, false).length > 0;
 }
 
+// A team Unit owes a stage that applies to its kind until the stage is
+// skipped for that Unit in this attempt: a skipped step has no work, no
+// review and no gate of its own.
+function teamUnitOwesStage(
+  stage: GraphStage,
+  unit: string,
+  unitKind: string | null,
+  ledger: UnitLedger,
+): boolean {
+  return teamUnitStageApplies(stage, unitKind) && !ledger.skipped.has(unit);
+}
+
 function unitProgressOwners(stateContent: string): Map<string, string> {
   const heading = /^## Unit Progress\r?$/m.exec(stateContent);
   if (!heading) return new Map();
@@ -12757,7 +12769,12 @@ function teamUnitProgressModel(
     for (const unit of mainOwnedUnits) {
       const unitKind = kinds?.get(unit) ?? null;
       const applicableStages = block.filter((stage) =>
-        teamUnitStageApplies(stage, unitKind)
+        teamUnitOwesStage(
+          stage,
+          unit,
+          unitKind,
+          ledgers.get(stage.slug) ?? unitLedgerFor(projectDir, stage.slug),
+        )
       );
       const settled = applicableStages.every((stage) =>
         unitSettled(
@@ -12813,8 +12830,8 @@ function teamUnitProgressModel(
     let allStageGatesApproved = true;
 
     for (const stage of block) {
-      const applies = teamUnitStageApplies(stage, unitKind);
       const ledger = ledgers.get(stage.slug) ?? unitLedgerFor(projectDir, stage.slug);
+      const applies = teamUnitOwesStage(stage, unit, unitKind, ledger);
       const settled = !applies ||
         unitSettled(
           projectDir,
@@ -13149,8 +13166,8 @@ function emitTeamUnitMajorRunStage(
     if (model?.mergedUnits.has(unit)) continue;
     const unitKind = kinds?.get(unit) ?? null;
     for (const stage of block) {
-      if (!teamUnitStageApplies(stage, unitKind)) continue;
       const ledger = ledgers.get(stage.slug) ?? unitLedgerFor(projectDir, stage.slug);
+      if (!teamUnitOwesStage(stage, unit, unitKind, ledger)) continue;
       if (
         !unitSettled(
           projectDir,
@@ -16380,6 +16397,94 @@ function skipTargetRefusal(
         `continue with \`${entrySkillInvocation()}\` and do the step it shows.`;
 }
 
+// The step a team-owned Unit is working on in this checkout, as the team walk
+// (emitTeamUnitMajorRunStage) routes it: the first step the Unit owes and has
+// not finished. null when the Unit is paused, waits at a step's gate, or owes
+// nothing more.
+function teamUnitStepInProgress(
+  projectDir: string,
+  scope: string,
+  stateContent: string,
+  unit: string,
+  unitKind: string | null,
+): GraphStage | null {
+  const rhythm = effectiveUnitGateRhythm(projectDir, stateContent);
+  const recordPrefix = engineRelativeRecordDir(projectDir);
+  const codekbCtx = codekbCtxFor(projectDir);
+  for (const stage of constructionUnitMajorBlock(scope, stateContent, true)) {
+    const ledger = unitLedgerFor(projectDir, stage.slug);
+    if (ledger.checkpoint?.unit === unit && ledger.checkpoint.state === "paused") return null;
+    if (!teamUnitOwesStage(stage, unit, unitKind, ledger)) continue;
+    if (!unitSettled(projectDir, stage, unit, recordPrefix, codekbCtx, unitKind, ledger)) return stage;
+    if (rhythm === "per-stage" && unitGateStatus(projectDir, stage.slug, unit, "per-stage") !== "approved") {
+      return null;
+    }
+  }
+  return null;
+}
+
+// A skip of a team-owned Unit's step. The Unit is the one this checkout
+// claimed (or the one named, where main works its own Units), and the step
+// must be the one it is working on: the skip covers that Unit only, and the
+// other Units, in their own checkouts, still take the step.
+function teamUnitSkip(
+  pd: string,
+  scope: string,
+  stateContent: string,
+  slug: string,
+  unit: string,
+  reason: string,
+  personAsked: boolean,
+): Directive {
+  const resume = `continue with \`${entrySkillInvocation()}\``;
+  try {
+    validateLiveUnitScope(pd, unit);
+  } catch (e) {
+    return errorDirective(errorMessage(e));
+  }
+  const resolution = resolveBoltBatches(pd);
+  if (resolution.state !== "ok" || !resolution.batches.flat().includes(unit)) {
+    return errorDirective(`Unit "${unit}" is not in the authoritative unit DAG.`);
+  }
+  const unitKind = resolution.unitKinds?.get(unit) ?? null;
+  const step = teamUnitStepInProgress(pd, scope, stateContent, unit, unitKind);
+  if (step === null) {
+    return errorDirective(
+      `Cannot skip "${slug}" for unit "${unit}": that unit has no step in progress to skip. ` +
+        `Continue with \`${entrySkillInvocation()}\` and do the step it shows.`,
+    );
+  }
+  if (step.slug !== slug) {
+    return errorDirective(
+      `Cannot skip "${slug}" for unit "${unit}": the step in progress for that unit is "${step.slug}", and a ` +
+        `skip covers that step only. If it does not apply to unit "${unit}", run ` +
+        `\`${aidlcToolInvocation("orchestrate")} report --stage ${shellArg(step.slug)} --unit ${shellArg(unit)} ` +
+        `--result skipped --reason "<why it does not apply>"\`. Otherwise do it for unit "${unit}", then ${resume}.`,
+    );
+  }
+  // Files already written for this Unit are its work for the step; only the
+  // person's own skip drops them, as in a solo walk.
+  if (!personAsked && unitsWithStageWork(pd, step, unitWorkContext(pd)).includes(unit)) {
+    return errorDirective(
+      `Cannot skip "${slug}" for unit "${unit}": that unit's files for this step are already written. ` +
+        `Finish the step for that unit instead, then ${resume}.`,
+    );
+  }
+  const res = spawnState(pd, ["skip", slug, "--reason", reason, "--unit", unit]);
+  if (res.exitCode !== 0) {
+    return stateRefusalDirective(
+      `Could not skip "${slug}" for unit "${unit}"`,
+      `unit "${unit}" of "${slug}"`,
+      (res.stderr || res.stdout).trim(),
+    );
+  }
+  return {
+    kind: "done",
+    reason: `Skipped "${slug}" for unit "${unit}" only; the other units still do this step. Run next to continue.`,
+    ...workflowContinues(pd),
+  };
+}
+
 // The list one late approval covers, for the gate being opened or shown again.
 function approvesTogetherArgs(pd: string, stateContent: string, node: GraphStage): string[] {
   const together = approveTogetherFor(pd, stateContent, node, engineRelativeRecordDir(pd), codekbCtxFor(pd));
@@ -16959,6 +17064,19 @@ function handleReport(args: string[], projectDir: string | undefined): void {
       emit(errorDirective(
         "report --result skipped requires a nonblank --reason <text>.",
       ));
+      return;
+    }
+    // A team-owned Unit walks its own steps in the checkout that claimed it,
+    // whatever Current Stage reads there, so a skip for a Unit (named, or this
+    // checkout's own) is matched against that Unit's own step in progress and
+    // covers that Unit only. A stage the plan no longer runs is skipped for
+    // every Unit below, as in a solo walk.
+    const teamUnit = isTeamUnitOwnership(stateContent) && node.phase === "construction" && isPerUnit(node) &&
+        planAction !== "SKIP"
+      ? flags.unit?.trim() || readApplicableTeamUnitScopeStamp(pd, stateContent)?.unit
+      : undefined;
+    if (teamUnit) {
+      emit(teamUnitSkip(pd, scope, stateContent, slug, teamUnit, reason, personAsked));
       return;
     }
     // Under solo unit-major, the walk runs one (stage, unit) beat at a time
