@@ -15190,6 +15190,7 @@ function emitTeamUnitMajorRunStage(
         );
         directive.gate = false;
         directive.unit = unit;
+        directive.next_stage = teamUnitNextStageName(projectDir, scope, refreshedState, stage, unit, unitKind, ledgers);
         // A Unit whose work is done is named the step it still owes, as on the
         // solo routes, never its stage body again.
         emitUnitStepOrStage(
@@ -15240,6 +15241,7 @@ function emitTeamUnitMajorRunStage(
         );
         directive.gate = true;
         directive.unit = unit;
+        directive.next_stage = teamUnitNextStageName(projectDir, scope, refreshedState, stage, unit, unitKind, ledgers);
         directive.unit_gate = "per-stage";
         const preflight = preflightDirective(
           projectDir,
@@ -15279,6 +15281,7 @@ function emitTeamUnitMajorRunStage(
       );
       directive.gate = true;
       directive.unit = unit;
+      directive.next_stage = teamUnitNextStageName(projectDir, scope, refreshedState, finalStage, unit, unitKind, ledgers);
       directive.unit_gate = "unit-end";
       const preflight = preflightDirective(
         projectDir,
@@ -15324,6 +15327,34 @@ function emitTeamUnitMajorRunStage(
     codekbCtx,
     projectDir,
   );
+}
+
+// The Approve option's "Continue to <next_stage>" for a team-owned Unit's
+// step: the next step this Unit owes, or, after its last, its landing (the
+// steps `next` names once the Unit is approved: publish, pin, the merge gate,
+// land). The next stage in plan order, Build and Test, runs once, after every
+// Unit lands. Main working its own Units keeps the plan's order, since it
+// lands nothing.
+function teamUnitNextStageName(
+  projectDir: string,
+  scope: string,
+  stateContent: string,
+  stage: GraphStage,
+  unit: string,
+  unitKind: string | null,
+  ledgers: ReadonlyMap<string, UnitLedger>,
+): string | null {
+  const block = constructionUnitMajorBlock(scope, stateContent, true);
+  const later = block.slice(block.findIndex((entry) => entry.slug === stage.slug) + 1).find((entry) =>
+    teamUnitOwesStage(entry, unit, unitKind, ledgers.get(entry.slug) ?? unitLedgerFor(projectDir, entry.slug))
+  );
+  if (later) return later.name;
+  if (readApplicableTeamUnitScopeStamp(projectDir, stateContent)?.unit === unit) return teamUnitLandingName(unit);
+  return nextInScopeStage(stage.slug, scope, stateContent)?.name ?? null;
+}
+
+function teamUnitLandingName(unit: string): string {
+  return `landing Unit ${unit}`;
 }
 
 // The first stop of the solo unit-major walk, without emitting it. Units walk
@@ -20188,12 +20219,19 @@ function handleReport(args: string[], projectDir: string | undefined): void {
         emit(withChangeNotices(parked, changeNotices));
         return;
       }
+      // The Unit's next step, or its landing after its last, as the run-stage named it.
+      const unitNext = teamUnitNextStageName(
+        pd, scope, stateContent, node, unit, resolution.unitKinds?.get(unit) ?? null, new Map(),
+      );
+      const landsNext = unitNext === teamUnitLandingName(unit);
       const unitReply = flags.result === "approved"
         ? {
             kind: "done" as const,
             reason:
               `Committed ${committed.join(" + ")} for unit "${unit}" of "${slug}". ` +
-              "Run next to continue the unit-major walk.",
+              (landsNext
+                ? `That was unit "${unit}"'s last step: run next for the steps that land it from this checkout.`
+                : "Run next to continue the unit-major walk."),
             ...workflowContinues(pd),
           }
         : printDirective(
@@ -20215,6 +20253,7 @@ function handleReport(args: string[], projectDir: string | undefined): void {
       }
       const unitGate = withChangeNotices(unitReply, changeNotices);
       if (unitGate.kind === "print" && (flags.result === "awaiting-approval" || flags.result === "revised")) {
+        unitGate.next_stage = unitNext;
         addReviewCheckOffer(unitGate, pd, node, unit);
         addContextParkOffer(unitGate, pd);
         addRevisionCycle(unitGate, pd, slug, unit);
