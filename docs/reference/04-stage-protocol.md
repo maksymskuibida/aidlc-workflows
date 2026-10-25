@@ -160,7 +160,11 @@ AskUserQuestion({
 name of the next in-scope stage) on the reply that opened the gate (`report
 --result awaiting-approval` or `revised`, computed when the gate opens, so a
 plan change made during the stage is in it), else the run-stage directive's
-(computed at emit time), or `Complete workflow` when `next_stage` is null. The
+(computed at emit time), or `Complete workflow` when `next_stage` is null. For a team-owned Unit's step, `next_stage` is the next step that Unit owes;
+after the Unit's last step, in the checkout that claimed it, it is `landing Unit
+<unit>` (publish, pin, the merge gate, land), and the approval's
+reply says that `next` gives those steps, since Build and Test runs once, after
+every Unit lands. The
 conductor never guesses the next stage.
 
 The conductor reads the person's reply, in any words, against what it showed
