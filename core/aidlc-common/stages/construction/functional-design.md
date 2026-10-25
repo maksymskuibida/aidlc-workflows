@@ -135,7 +135,9 @@ A requirement with sub-requirements is traced through its `FR{n}.{m}` IDs and
 needs no row of its own.
 
 Set each ID's `coverage` row: `OK` with a `target` naming one or more
-`BRx.y` IDs that exist in `rules.md`; `N/A` with the reason as its `target`
+`BRx.y` IDs that exist in `rules.md` (a Unit whose kind writes no `rules.md`,
+a `ui` Unit, names instead the file of this stage that covers it, such as
+`frontend-components.md` or `functional-spec.md`); `N/A` with the reason as its `target`
 (for example `delivered by u2-profile`); `Deferred` with the later stage that
 covers it as its `target`; or `GAP` while this design does not cover it. Use
 the optional `reverse` array to explain rules that intentionally have no
@@ -190,7 +192,9 @@ Upstream targets: `unit-of-work`, `unit-of-work-story-map`, `stories`, `requirem
 `linter` and `type-check` inspect matching TypeScript/JavaScript snippets.
 `traceability` verifies that every acceptance criterion of the stories mapped
 to this Unit, or every fallback `FR`, is declared and covered; checks `BRx.y`
-targets against `rules.md`; and finds unexplained business-rule orphans.
+targets against `rules.md`, or for a Unit whose kind writes no `rules.md`, that
+each target names one of its Functional Design files that exists; and finds
+unexplained business-rule orphans.
 
 ## Learn
 
