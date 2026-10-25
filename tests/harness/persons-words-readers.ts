@@ -1137,7 +1137,8 @@ export const ALLOWED: Record<string, Allowed> = {
   [`${GUARD_SWITCH}#setterCommandNames`]: { use: "keeps", why: "the /aidlc parse (reading-lead, S7a answers Q3): whether the typed line is the setter command itself, by the dispatcher's own parse", from: [`${GUARD_SWITCH}#saidInChat`] },
   // The host-text identities kept where the host gives no mark (Arden 2026-10-22, DESIGN section 3 item 4).
   [`${LIB}#hostEnvelopeTurnText`]: { use: "decides", why: "host-text identity: Kiro Crew's request header (P2)", from: [`${HOOK}#respond`] },
-  [`${LIB}#hostTemplateOrigin`]: { use: "decides", why: "host-text identity: the Kiro CLI v2, Claude no-row and Kiro workflow brief templates (P1)", from: [`${HOOK}#respond`] },
+  [`${LIB}#hostTemplateOrigin`]: { use: "decides", why: "host-text identity: the Kiro CLI v2, Claude no-row and Kiro workflow brief templates (P1)", from: [`${HOOK}#claudeHostTemplateOrigin`] },
+  [`${HOOK}#claudeHostTemplateOrigin`]: { use: "decides", why: "host-text identity: the Claude no-row templates, read after the desktop app's leading system-reminder blocks (P1)", from: [`${HOOK}#respond`] },
   [`${LIB}#claudeTranscriptOrigin`]: { use: "decides", why: "host-text identity: finds Claude Code's transcript row for this prompt (P1's marked path)", from: [`${HOOK}#respond`] },
   [`${LIB}#newestUserEntry`]: { use: "decides", why: "host-text identity: the transcript row whose text is this prompt", from: [`${LIB}#claudeTranscriptOrigin`] },
   // The legacy Kiro IDE nonce match, while that window exists (DESIGN 2.2a R11).
