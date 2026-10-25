@@ -1223,6 +1223,7 @@ const TRANSPORTED_ATTEMPT_EVENTS = new Set([
   "UNIT_PAUSED",
   "UNIT_RESUMED",
   "UNIT_COMPLETED",
+  "UNIT_SKIPPED",
   "STAGE_AWAITING_APPROVAL",
   "STAGE_REVISING",
   "GATE_APPROVED",
@@ -1773,7 +1774,8 @@ function candidateEvidence(
     !TRANSPORTED_DATA_EVENTS.has(row.event)
   );
   const snapshotRows = [...floorRows, ...authorityRows];
-  const stagesCompleted = stages.filter((stage) =>
+  const snapshots = new Map(stages.map((stage) => [
+    stage,
     unitLifecycleSnapshot(
       projectDir,
       stage,
@@ -1790,12 +1792,19 @@ function candidateEvidence(
             unitKind,
           ),
       },
-    ).receipts.has(claim.unit)
+    ),
+  ]));
+  // A step skipped for this Unit in this attempt is settled by its
+  // UNIT_SKIPPED receipt: it has no documents, review or gate of its own. The
+  // Unit's own approval at the end of its walk still counts under unit-end.
+  const skipped = new Set(stages.filter((stage) => snapshots.get(stage)?.skipped.has(claim.unit)));
+  const stagesCompleted = stages.filter((stage) =>
+    skipped.has(stage) || snapshots.get(stage)?.receipts.has(claim.unit)
   );
   const gatesExpected =
     claim.payload.gate_rhythm === "unit-end"
       ? [stages[stages.length - 1]]
-      : stages;
+      : stages.filter((stage) => !skipped.has(stage));
   const gatesApproved = gatesExpected.filter((stage) =>
     unitGateStatus(
       projectDir,
@@ -1809,6 +1818,7 @@ function candidateEvidence(
   const reviewersReady: string[] = [];
   const artifactPaths: string[] = [];
   for (const stageSlug of stages) {
+    if (skipped.has(stageSlug)) continue;
     const stage = graph.find((entry) => entry.slug === stageSlug);
     if (!stage) fail(`Pinned candidate references unknown stage "${stageSlug}".`);
     const names = filterProducesByKind(
@@ -1851,7 +1861,8 @@ function candidateEvidence(
   const questionsPath =
     `${recordPrefix}/construction/${claim.unit}/code-generation/code-generation-questions.md`;
   let planFingerprint: string | null = null;
-  if (stages.includes("code-generation")) {
+  const plansCode = stages.includes("code-generation") && !skipped.has("code-generation");
+  if (plansCode) {
     const plan = gitTextAt(
       projectDir,
       claim.oid,
@@ -1950,7 +1961,7 @@ function candidateEvidence(
     const missingReviewStages = reviewersExpected.filter((stage) => !reviewersReady.includes(stage));
     incomplete.push(`reviewer READY receipts (${missingReviewStages.join(", ")})`);
   }
-  if (stages.includes("code-generation") && !planFingerprint) {
+  if (plansCode && !planFingerprint) {
     incomplete.push("Plan Approval fingerprint");
   }
   if (changedAudit.length === 0) {
