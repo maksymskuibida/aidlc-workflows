@@ -814,7 +814,6 @@ jobs:
       # ends with the report, trimmed so the whole body stays within GitHub's
       # release limit.
       - name: Stage preview notes
-        if: ${{ needs.test.result == 'success' }}
         env:
           FULL_SUITE_RESULT: ${{ needs.full_suite.outputs.result || 'failure' }}
           PREVIEW_PLAN: ${{ needs.validate.outputs.preview_plan }}
@@ -823,7 +822,9 @@ jobs:
           set -euo pipefail
           plan="$RUNNER_TEMP/aidlc-preview-plan.json"
           printf '%s\n' "$PREVIEW_PLAN" >"$plan"
-          if [ "$FULL_SUITE_RESULT" != success ] || [ "$UPDATE_RESULT" != success ]; then
+          # This fork tests on its own machine, so the test job and its report are skipped here.
+          if [ -f "$RUNNER_TEMP/preview-test-report/preview-test-report.md" ] &&
+            { [ "$FULL_SUITE_RESULT" != success ] || [ "$UPDATE_RESULT" != success ]; }; then
             bun scripts/ci-preview-test-report.ts --stage-notes "$plan" \
               "$RUNNER_TEMP/preview-test-report/preview-test-report.md"
           fi
