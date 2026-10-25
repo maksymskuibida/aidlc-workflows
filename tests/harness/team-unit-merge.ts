@@ -528,6 +528,15 @@ export function prepareCandidate(
     /** Leave the Unit's row of the candidate's aidlc-state.md as main had it
      *  instead of marking it complete: the row is derived from receipts. */
     keepRow?: boolean;
+    /** The per-Unit stages the Unit has worked, in order; the default is all
+     *  five. A case that stops partway leaves the rest to the walk. */
+    stages?: string[];
+    /** Stages skipped for this Unit: a UNIT_SKIPPED receipt and nothing else. */
+    skipStages?: string[];
+    /** Stages whose per-stage gate is left open: no GATE_APPROVED row. */
+    ungated?: string[];
+    /** Leave the work committed in the checkout and do not publish it. */
+    publish?: boolean;
   } = {},
 ): {
   checkout: string;
@@ -543,13 +552,15 @@ export function prepareCandidate(
   const claimPayload = JSON.parse(claim.stdout);
   const generation = claimPayload.generation as number;
   const intentUuid = claimPayload.intent_uuid as string;
-  const stages = [
+  const stages = options.stages ?? [
     "functional-design",
     "nfr-requirements",
     "nfr-design",
     "infrastructure-design",
     "code-generation",
   ];
+  const skipStages = new Set(options.skipStages ?? []);
+  const writesCode = stages.includes("code-generation") && !skipStages.has("code-generation");
   let state = readFileSync(seededStateFile(checkout), "utf-8");
   const rowCells = [
     unit,
@@ -579,6 +590,7 @@ export function prepareCandidate(
 
   const graph = loadStageGraphAll();
   for (const stageSlug of stages) {
+    if (skipStages.has(stageSlug)) continue;
     const stage = graph.find((entry) => entry.slug === stageSlug)!;
     const dir = join(
       seededRecordDir(checkout),
@@ -629,9 +641,11 @@ export function prepareCandidate(
     "## Plan Approval\n" +
     `[Approval Fingerprint]: ${planFingerprint}\n` +
     `${options.answerLine ?? "[Answer]: A. Approve Plan"}\n`;
-  writeFileSync(join(codeDir, "code-generation-plan.md"), plan);
-  writeFileSync(join(codeDir, "unit-test-instructions.md"), instructions);
-  writeFileSync(questionsFile, questions);
+  if (writesCode) {
+    writeFileSync(join(codeDir, "code-generation-plan.md"), plan);
+    writeFileSync(join(codeDir, "unit-test-instructions.md"), instructions);
+    writeFileSync(questionsFile, questions);
+  }
   const srcDir = join(checkout, "src");
   mkdirSync(srcDir, { recursive: true });
   writeFileSync(
@@ -645,6 +659,10 @@ export function prepareCandidate(
   const floor = options.runFloor ?? "unstarted#0";
   let audit = "";
   for (const stage of stages) {
+    if (skipStages.has(stage)) {
+      audit += auditBlock("UNIT_SKIPPED", unit, generation, stage, "**Reason**: the person asked to skip it\n", floor);
+      continue;
+    }
     const stageNode = graph.find((entry) => entry.slug === stage);
     const lifecycleExtra = options.wave && stageNode
       ? `**Mode**: wave\n**Artifact Fingerprint**: ${
@@ -723,6 +741,7 @@ export function prepareCandidate(
         floor,
       );
     }
+    if (options.ungated?.includes(stage)) continue;
     audit += auditBlock(
       "GATE_APPROVED",
       unit,
@@ -741,6 +760,7 @@ export function prepareCandidate(
   writeFileSync(shardPath, priorShard + audit);
   git(checkout, ["add", "-A"]);
   git(checkout, ["commit", "-m", `complete ${unit}`]);
+  if (options.publish === false) return { checkout, candidateOid: "", generation, auditShard };
   const published = runMergeTool(UNIT, ["publish", unit], checkout);
   expect(published.status, published.out).toBe(0);
   return {
