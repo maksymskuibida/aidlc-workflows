@@ -2269,10 +2269,20 @@ export const KIRO_CLI_HOST_TEMPLATES: readonly HostTurnTemplate[] = [
 export const CLAUDE_HOST_TEMPLATES: readonly HostTurnTemplate[] = [
   { name: "claude task notification", pattern: /^<task-notification>\r?\n[\s\S]*\r?\n<\/task-notification>$/ },
   { name: "claude agent message", pattern: /^<agent-message from="[^"\r\n]*">\r?\n[\s\S]*\r?\n<\/agent-message>$/ },
+  // The Claude desktop app, captured live (2.1.31x): the turns the app sends
+  // itself carry the same `sdk` mark as the person's, so only their words tell
+  // them apart. Another session's message is its element alone (its row wraps
+  // it in a sentence, so the row is never found by the prompt's text); the
+  // app's events are one element each; its note after a quit is one sentence;
+  // a session started from another one opens with that session's brief.
   {
     name: "claude session message",
     pattern: /^<cross-session-message(?: [^\r\n]*)?>\r?\n[\s\S]*\r?\n<\/cross-session-message>$/,
   },
+  { name: "claude side sessions event", pattern: /^<side-sessions-event>[\s\S]*<\/side-sessions-event>$/ },
+  { name: "claude ci monitor event", pattern: /^<ci-monitor-event>[\s\S]*<\/ci-monitor-event>$/ },
+  { name: "claude app resume", pattern: /^The app was quit while you were working\. Please continue from where you left off\.$/ },
+  { name: "claude session brief", pattern: /^(?:Background|Task) \(from the session that started this one\):\r?\n/ },
 ];
 
 // The whole prompt is one of the host's fixed sentences. Null otherwise.
@@ -2612,11 +2622,16 @@ export function kiroTurnOrigin(options: {
 // row for this `prompt_id` with exactly this text. Claude Code names the turn's
 // origin on it (measured 2.1.280: `turnOrigin: "task_notification"`,
 // `promptSource: "system"`, `origin.kind: "task-notification"` for a
-// background task's notice; `human`/`typed` for a typed turn, `sdk` for one
-// sent through the SDK). A message the person sends while a turn runs has no
-// row of its own (it rides the running turn's prompt id), so no row means
-// nothing is known.
-const CLAUDE_HOST_TURN_ORIGINS = new Set(["task_notification"]);
+// background task's notice; `human`/`typed` for a typed turn). A row with
+// neither mark decides nothing: the desktop app sends the person's messages and
+// its own notes alike as `sdk` (an earlier build marked neither with an
+// origin), so its words decide (claudeHostTemplateOrigin in the human-turn
+// hook). A message the person sends while a turn runs has no row of its own (it
+// rides the running turn's prompt id), so no row means nothing is known.
+const CLAUDE_HOST_TURN_ORIGINS = new Set(["task_notification", "peer"]);
+// The origin kinds a row or a queued message carries for a turn the person did
+// not type (measured 2.1.296).
+const CLAUDE_QUEUED_HOST_ORIGINS = new Set(["task-notification", "coordinator", "peer", "auto-continuation"]);
 export function claudeTranscriptOrigin(transcriptPath: unknown, promptId: unknown, prompt: string): TurnOrigin | null {
   if (typeof transcriptPath !== "string" || !transcriptPath.endsWith(".jsonl") || !prompt.trim()) return null;
   const id = typeof promptId === "string" && promptId.trim() ? promptId.trim() : null;
@@ -2629,11 +2644,12 @@ export function claudeTranscriptOrigin(transcriptPath: unknown, promptId: unknow
   if (
     entry.promptSource === "system" ||
     (turnOrigin !== undefined && CLAUDE_HOST_TURN_ORIGINS.has(turnOrigin)) ||
-    origin === "task-notification"
+    (typeof origin === "string" && CLAUDE_QUEUED_HOST_ORIGINS.has(origin))
   ) {
     return { kind: "host", reason: turnOrigin ?? (typeof origin === "string" ? origin : "system"), source: "record" };
   }
-  return { kind: "person", source: "record" };
+  if (origin === "human" || turnOrigin === "human" || entry.promptSource === "typed") return { kind: "person", source: "record" };
+  return null;
 }
 
 // Who wrote a message Claude Code fed into a running turn. The transcript keeps
@@ -2642,7 +2658,6 @@ export function claudeTranscriptOrigin(transcriptPath: unknown, promptId: unknow
 // the person typed while the agent worked; a background task's notice, a
 // coordinator or peer agent and an auto-continuation carry their own kind).
 // Null for any other entry and for one with no origin (older builds).
-const CLAUDE_QUEUED_HOST_ORIGINS = new Set(["task-notification", "coordinator", "peer", "auto-continuation"]);
 export function claudeQueuedMessageOrigin(entry: Record<string, unknown>): "person" | "host" | null {
   const attachment = entry.type === "attachment" ? entry.attachment : undefined;
   if (attachment === null || typeof attachment !== "object") return null;
