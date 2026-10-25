@@ -58,10 +58,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  CLAUDE_HOST_TEMPLATES,
   auditBlockField,
   carryPendingPersonLines,
   classifyTerminalCommand,
+  claudeHostTemplateOrigin,
   claudeTranscriptOrigin,
   clearSessionIntentHandoff,
   emptyPickerResult,
@@ -80,7 +80,6 @@ import {
   forgetGateWords,
   hookContextLine,
   hooksHealthDir,
-  hostTemplateOrigin,
   humanTurnMintAllowed,
   isoTimestamp,
   markHumanTurn,
@@ -604,10 +603,10 @@ try {
     } else if (promptSubmitted && typedPrompt && typeof parsed.transcript_path === "string") {
       // Claude Code hands its transcript to the hook: its row for this prompt
       // names who started the turn. With no row (2.1.310 writes it only after
-      // this hook returns), only the host's whole notice or message block
-      // counts as the host's.
+      // this hook returns) or one that names no origin (the desktop app's), only
+      // the host's whole notice, message block or note counts as the host's.
       turnOrigin = claudeTranscriptOrigin(parsed.transcript_path, parsed.prompt_id, typedPrompt) ??
-        hostTemplateOrigin(typedPrompt, CLAUDE_HOST_TEMPLATES) ??
+        claudeHostTemplateOrigin(typedPrompt) ??
         { kind: "person" };
     }
   } catch { /* presence still records without identity on legacy payloads */ }
