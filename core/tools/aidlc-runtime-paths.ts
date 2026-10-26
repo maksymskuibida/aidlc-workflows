@@ -274,7 +274,7 @@ function inBunInstallCache(path: string): boolean {
 // changes nor a native executable's process.execPath can turn a script into a
 // dispatcher command.
 export function aidlcEngineCommand(
-  route: "orchestrate" | "log" | "state" | "bolt" | "runtime" | "sensor",
+  route: "orchestrate" | "log" | "state" | "bolt" | "runtime" | "sensor" | "jump",
   args: readonly string[],
   sourceToolPath?: string,
   executable: string | null = compiledExecutable(),
