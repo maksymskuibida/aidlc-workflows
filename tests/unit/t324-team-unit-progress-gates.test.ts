@@ -668,11 +668,14 @@ describe("t324 team-owned unit progress and per-unit gates", () => {
       expect(unitGateStatus(proj, stage, "alpha", "per-stage")).toBe("revising");
     }
 
-    // Each reopened step runs again and asks its own gate before the next one.
+    // Each reopened step runs again and asks its own gate before the next one,
+    // once its revision is reported.
     for (const stage of reopened) {
       const body = runNext(proj);
       expect(body).toMatchObject({ kind: "run-stage", stage, unit: "alpha", gate: false });
       settleBody(proj, body);
+      expect(runNext(proj).message).toContain("--unit alpha --result revised");
+      expect(runReport(proj, ["--stage", stage, "--unit", "alpha", "--result", "revised"]).kind).toBe("print");
       const gate = runNext(proj);
       expect(gate).toMatchObject({ stage, unit: "alpha", gate: true, unit_gate: "per-stage" });
       approveGate(proj, gate);
@@ -1064,6 +1067,29 @@ describe("t324 team-owned unit progress and per-unit gates", () => {
     expect(blocked.out).toContain(
       "Stage status cannot be changed with aidlc-state.ts refresh-unit-progress",
     );
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // The gate left revising by Request Changes is not open once the work is
+  // redone: its revised report puts it to the person again, and then their
+  // second Request Changes, and later their Approve, record.
+  test("a Unit gate rebuilt after Request Changes is reported revised before it is shown again", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    settleBody(proj, runNext(proj));
+    const args = ["--stage", "functional-design", "--unit", "alpha"];
+    expect(runReport(proj, [...args, "--result", "awaiting-approval"]).kind).toBe("print");
+    const requestChanges = [...args, "--result", "rejected", "--user-input", "Request Changes", "--reason", "Rename it"];
+    for (let round = 0; round < 2; round++) {
+      expect(runReport(proj, requestChanges).kind).toBe("print");
+      settleBody(proj, runNext(proj));
+      const step = runNext(proj);
+      expect(step.kind, JSON.stringify(step)).toBe("print");
+      expect(step.message).toContain("--unit alpha --result revised");
+      expect(runReport(proj, [...args, "--result", "revised"]).kind).toBe("print");
+      expect(runNext(proj)).toMatchObject({ stage: "functional-design", unit: "alpha", gate_only: true, unit_gate: "per-stage" });
+    }
+    expect(runReport(proj, [...args, "--result", "approved", "--user-input", "Approve"]))
+      .toMatchObject({ kind: "done" });
+    expect(unitGateStatus(proj, "functional-design", "alpha", "per-stage")).toBe("approved");
   }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
 
   test("unit-keyed rejection floors only the rejected unit's lifecycle and review receipts", () => {
