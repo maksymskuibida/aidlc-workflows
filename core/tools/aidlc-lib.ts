@@ -41903,6 +41903,7 @@ export const NEXT_FLAGS: ReadonlyMap<string, NextFlagShape> = new Map<string, Ne
   ["--release", { value: "free", valueMayLookLikeFlag: true }],
   ["--team", { value: "free", valueMayLookLikeFlag: true }],
   ["--rhythm", { value: "free", valueMayLookLikeFlag: true }],
+  ["--skip-stages", { value: "free" }],
   ["--depth", { value: "words", words: DEPTH_VALUES }],
   ["--test-strategy", { value: "words", words: DEPTH_VALUES }],
   ["--review", { value: "words", words: ["adversarial", "advisory", "none"] }],
