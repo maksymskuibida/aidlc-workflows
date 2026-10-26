@@ -541,6 +541,8 @@ export function prepareCandidate(
     skipStages?: string[];
     /** Stages whose per-stage gate is left open: no GATE_APPROVED row. */
     ungated?: string[];
+    /** Claim with the unit-end rhythm: one approval on the last stage, none per stage. */
+    unitEnd?: boolean;
     /** Leave the work committed in the checkout and do not publish it. */
     publish?: boolean;
   } = {},
@@ -552,7 +554,11 @@ export function prepareCandidate(
 } {
   const checkout = options.checkout ?? clone(remote, label);
   if (options.crlf) git(checkout, ["config", "core.autocrlf", "false"]);
-  const claim = runMergeTool(UNIT, ["claim", unit, "--team", label], checkout);
+  const claim = runMergeTool(
+    UNIT,
+    ["claim", unit, "--team", label, ...(options.unitEnd ? ["--rhythm", "unit-end"] : [])],
+    checkout,
+  );
   expect(claim.status, claim.out).toBe(0);
   if (options.branch) git(checkout, ["switch", "-c", options.branch]);
   options.afterClaim?.(checkout);
@@ -748,13 +754,24 @@ export function prepareCandidate(
         floor,
       );
     }
-    if (options.ungated?.includes(stage)) continue;
+    if (options.unitEnd || options.ungated?.includes(stage)) continue;
     audit += auditBlock(
       "GATE_APPROVED",
       unit,
       generation,
       stage,
       `**Gate Scope**: per-stage\n**Gate Stages**: ${stage}\n**User Input**: Approve\n`,
+      floor,
+    );
+  }
+  const lastStage = stages[stages.length - 1];
+  if (options.unitEnd && lastStage && !options.ungated?.includes(lastStage)) {
+    audit += auditBlock(
+      "GATE_APPROVED",
+      unit,
+      generation,
+      lastStage,
+      `**Gate Scope**: unit-end\n**Gate Stages**: ${stages.join(", ")}\n**User Input**: Approve\n`,
       floor,
     );
   }
