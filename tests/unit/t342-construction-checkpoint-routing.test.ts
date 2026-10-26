@@ -3803,6 +3803,13 @@ describe("t342 a unit-major recovery keeps every Unit's finished work", () => {
     const rejected = tool(p, "orchestrate", [...gate, "--result", "rejected", "--user-input", "Request Changes", "--reason", words], chat(p));
     expect(JSON.parse(rejected.stdout).message, rejected.out).toStartWith(`Recorded rejected for unit "${unit}"`);
   }
+  // The gate Request Changes left revising is reported revised once the Unit
+  // is rebuilt, and only then shown again.
+  function teamReportRevised(p: string, unit: string) {
+    expect(String(next(p).message ?? "")).toContain(`--unit ${unit} --result revised`);
+    const revised = tool(p, "orchestrate", ["report", "--stage", "code-generation", "--unit", unit, "--result", "revised"]);
+    expect(revised.status, revised.out).toBe(0);
+  }
 
   test("strict, team: a team Unit sent back twice at its gate, the code changing, gets each redo reviewed", () => {
     const p = teamUnits();
@@ -3810,6 +3817,7 @@ describe("t342 a unit-major recovery keeps every Unit's finished work", () => {
     for (const round of [1, 2]) {
       teamSendBack(p, "alpha", `Return a clear error for an empty name (round ${round})`);
       buildReviewed(p, "alpha", alphaAt(p, round + 1));
+      teamReportRevised(p, "alpha");
     }
     expect(next(p)).toMatchObject({ stage: "code-generation", unit: "alpha", gate: true });
   }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
@@ -3862,6 +3870,7 @@ describe("t342 a unit-major recovery keeps every Unit's finished work", () => {
       expect(buildReviewed(p, "alpha", alphaAt(p, 2)).request?.recovery).toBe("stale-receipt");
       alphaAt(p, 3)();
       carriesOn(tool(p, "log", codeReview("alpha", 2)));
+      teamReportRevised(p, "alpha");
       expect(next(p)).toMatchObject({ kind: "run-stage", stage: "code-generation", unit: "alpha", gate: true });
     }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
 
