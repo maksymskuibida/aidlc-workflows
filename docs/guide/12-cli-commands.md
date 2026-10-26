@@ -42,7 +42,7 @@ diagnostic and lifecycle routes.
 | `/aidlc knowledge <verb>` | Index and read your own documents (`onboard`, `sync`, `list`, `show`, `associate`, `dissociate`, `rebind`, `summarize`) |
 | `/aidlc --status` | Display a read-only status summary |
 | `/aidlc --config [section]` | Configure project policy conversationally, then land exact deterministic config flags |
-| `/aidlc --claim <unit> [--team <label>] [--rhythm <per-stage\|unit-end>]` | Atomically claim an open team-owned Unit and bind this checkout to that attempt |
+| `/aidlc --claim <unit> [--team <label>] [--rhythm <per-stage\|unit-end>] [--skip-stages <stage[,stage...]>]` | Atomically claim an open team-owned Unit and bind this checkout to that attempt |
 | `/aidlc --release <unit>` | Release a live Unit claim from unscoped main by publishing a tombstone |
 | `/aidlc unit adopt <unit>` | Adopt the checked-out live claim branch in a fresh clone |
 | `/aidlc unit participate` | Mark this clone for the guided Unit-claim picker |
@@ -560,12 +560,18 @@ concurrent claimant succeeds.
 /aidlc --claim user-profile-api
 /aidlc --claim user-profile-api --team "Alice"
 /aidlc --claim user-profile-api --rhythm unit-end
+/aidlc --claim user-profile-api --skip-stages nfr-requirements,nfr-design,infrastructure-design
 /aidlc unit claim user-profile-api --team "Alice"
 ```
 
 `--team` supplies the human-readable holder label. `--rhythm` optionally pins
 this claim to `per-stage` or `unit-end`; when omitted, the workflow's affirmed
-Unit gate rhythm is used. Claims are refused until dependencies and any required
+Unit gate rhythm is used. `--skip-stages` names the per-Unit Construction
+stages left out for this Unit (any of them but `code-generation`): right after
+the claim each gets the Unit's skip record, Unit Progress shows them `[S]`, and
+the Unit's walk starts at the first stage left in; other Units still do them.
+A stage that is not one of the plan's per-Unit stages refuses the claim, and
+nothing is claimed. Claims are refused until dependencies and any required
 walking skeleton are complete, and a checkout with a live claim routes only its
 stamped Unit.
 
