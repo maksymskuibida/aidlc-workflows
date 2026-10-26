@@ -543,6 +543,9 @@ export function prepareCandidate(
     ungated?: string[];
     /** Claim with the unit-end rhythm: one approval on the last stage, none per stage. */
     unitEnd?: boolean;
+    /** Stages left out at claim with `claim --skip-stages`: the engine writes
+     *  their skip records, and the case writes nothing for them. */
+    claimSkipStages?: string[];
     /** Leave the work committed in the checkout and do not publish it. */
     publish?: boolean;
   } = {},
@@ -556,7 +559,14 @@ export function prepareCandidate(
   if (options.crlf) git(checkout, ["config", "core.autocrlf", "false"]);
   const claim = runMergeTool(
     UNIT,
-    ["claim", unit, "--team", label, ...(options.unitEnd ? ["--rhythm", "unit-end"] : [])],
+    [
+      "claim",
+      unit,
+      "--team",
+      label,
+      ...(options.unitEnd ? ["--rhythm", "unit-end"] : []),
+      ...(options.claimSkipStages?.length ? ["--skip-stages", options.claimSkipStages.join(",")] : []),
+    ],
     checkout,
   );
   expect(claim.status, claim.out).toBe(0);
@@ -572,7 +582,8 @@ export function prepareCandidate(
     "infrastructure-design",
     "code-generation",
   ];
-  const skipStages = new Set(options.skipStages ?? []);
+  const claimSkipped = new Set(options.claimSkipStages ?? []);
+  const skipStages = new Set([...(options.skipStages ?? []), ...claimSkipped]);
   const writesCode = stages.includes("code-generation") && !skipStages.has("code-generation");
   let state = readFileSync(seededStateFile(checkout), "utf-8");
   const rowCells = [
@@ -673,7 +684,9 @@ export function prepareCandidate(
   let audit = "";
   for (const stage of stages) {
     if (skipStages.has(stage)) {
-      audit += auditBlock("UNIT_SKIPPED", unit, generation, stage, "**Reason**: the person asked to skip it\n", floor);
+      if (!claimSkipped.has(stage)) {
+        audit += auditBlock("UNIT_SKIPPED", unit, generation, stage, "**Reason**: the person asked to skip it\n", floor);
+      }
       continue;
     }
     const stageNode = graph.find((entry) => entry.slug === stage);
