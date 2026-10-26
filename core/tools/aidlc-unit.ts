@@ -1188,12 +1188,13 @@ function mainUnitRowMerged(
     "gate",
     "merged",
   ];
+  // A step skipped for the Unit is folded as skipped, not as done.
+  const skipped = new Set(transaction.evidence.stages_skipped ?? []);
   return expected.every((name) => {
     const index = header.findIndex((cell) => cell.toLowerCase() === name);
     if (index < 0) return false;
-    return name === "owner"
-      ? row[index] === transaction.owner
-      : row[index] === "[x]";
+    if (name === "owner") return row[index] === transaction.owner;
+    return row[index] === "[x]" || (skipped.has(name) && row[index] === "[S]");
   });
 }
 
@@ -1942,6 +1943,7 @@ function candidateEvidence(
   const evidence: UnitMergeEvidence = {
     stages_expected: stages,
     stages_completed: stagesCompleted,
+    ...(skipped.size > 0 ? { stages_skipped: stages.filter((stage) => skipped.has(stage)) } : {}),
     gates_expected: gatesExpected,
     gates_approved: gatesApproved,
     reviewers_expected: reviewersExpected,
@@ -2471,9 +2473,13 @@ export function pullRequestMergeGateAsk(projectDir: string, unit: string): {
   const transaction = readUnitMergeTransaction(projectDir, unit);
   if (!transaction) return null;
   const evidence = transaction.evidence;
-  const gates = evidence.gates_approved.length === evidence.gates_expected.length
-    ? `all ${evidence.stages_expected.length} stages are approved`
-    : `${evidence.gates_approved.length} of ${evidence.gates_expected.length} stage approvals are recorded`;
+  const skipped = evidence.stages_skipped ?? [];
+  const gates = evidence.gates_approved.length !== evidence.gates_expected.length
+    ? `${evidence.gates_approved.length} of ${evidence.gates_expected.length} stage approvals are recorded`
+    : skipped.length === 0
+      ? `all ${evidence.stages_expected.length} stages are approved`
+      : `${evidence.stages_expected.length - skipped.length} of ${evidence.stages_expected.length} stages are approved and ` +
+        `${skipped.join(", ")} ${skipped.length === 1 ? "is" : "are"} skipped for this Unit`;
   const reviews = evidence.reviewers_expected.length === 0
     ? ""
     : evidence.reviewers_ready.length === evidence.reviewers_expected.length
