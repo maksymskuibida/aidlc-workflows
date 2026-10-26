@@ -4908,6 +4908,7 @@ export interface ParsedFlags {
   release?: string;
   claimTeam?: string;
   claimRhythm?: string;
+  claimSkipStages?: string;
   projectDir?: string;
   parseError?: string;
   /**
@@ -5325,6 +5326,10 @@ export function parseNextFlags(argv: string[]): ParsedFlags {
       flags.claimRhythm = value;
     } else if (a === "--rhythm") {
       flags.parseError = "--rhythm requires <per-stage|unit-end>.";
+    } else if (a === "--skip-stages" && value !== undefined) {
+      flags.claimSkipStages = value;
+    } else if (a === "--skip-stages") {
+      flags.parseError = "--skip-stages requires <stage[,stage...]>.";
     } else if (a === "--init" || a === "--force") {
       // RETIRED flags; see the named "Branch 3 — the legacy `--init` flag —
       // retired in P4" note in routeNext. Record and consume them so they never
@@ -5395,11 +5400,11 @@ export function parseNextFlags(argv: string[]): ParsedFlags {
     const said = wordTokens.join(" ").replace(ENTRY_WORD_PREFIX, "").trim();
     if (said.length > 0 && said !== flags.intent) flags.personWords = said;
   }
-  if (!flags.claim && (flags.claimTeam || flags.claimRhythm)) {
-    flags.parseError = "--team and --rhythm require --claim <unit>.";
+  if (!flags.claim && (flags.claimTeam || flags.claimRhythm || flags.claimSkipStages)) {
+    flags.parseError = "--team, --rhythm and --skip-stages require --claim <unit>.";
   }
-  if (flags.release && (flags.claimTeam || flags.claimRhythm)) {
-    flags.parseError = "--release does not accept --team or --rhythm.";
+  if (flags.release && (flags.claimTeam || flags.claimRhythm || flags.claimSkipStages)) {
+    flags.parseError = "--release does not accept --team, --rhythm or --skip-stages.";
   }
   if (flags.retiredFlags && isRetiredOnlyNextArgv(args)) {
     flags.retiredOnly = true;
@@ -9013,8 +9018,11 @@ function routeNext(agentArgs: string[], projectDir: string | undefined): void {
     const rhythmArg = flags.claimRhythm
       ? ` --rhythm ${shellArg(flags.claimRhythm)}`
       : "";
+    const skipArg = flags.claimSkipStages
+      ? ` --skip-stages ${shellArg(flags.claimSkipStages)}`
+      : "";
     emit(turnEndingPrint(
-      `Run \`${aidlcInvocation()} --${verb} ${shellArg(unit)}${teamArg}${rhythmArg}\`, ` +
+      `Run \`${aidlcInvocation()} --${verb} ${shellArg(unit)}${teamArg}${rhythmArg}${skipArg}\`, ` +
         `print its output verbatim, then stop. Re-run ${entrySkillInvocation()} after the claim registry changes.`,
     ));
     return;
