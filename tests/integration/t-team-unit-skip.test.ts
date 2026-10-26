@@ -14,6 +14,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AIDLC_SRC, seededStateFile } from "../harness/fixtures.ts";
+import { pullRequestMergeGateAsk } from "../../dist/claude/.claude/tools/aidlc-unit.ts";
 import {
   UNIT,
   cleanupTempDirs,
@@ -21,8 +22,10 @@ import {
   gateAndLand,
   makeSeed,
   nextDirective,
+  parallelDependencyBody,
   prepareCandidate,
   runMergeTool,
+  unitProgressRow,
 } from "../harness/team-unit-merge.ts";
 
 setDefaultTimeout(NATIVE_MULTI_WORKTREE_CASE_TIMEOUT_MS);
@@ -48,6 +51,25 @@ function claimed(remote: string, unit: string, label: string): string {
   const claim = runMergeTool(UNIT, ["claim", unit, "--team", label], checkout);
   expect(claim.status, claim.out).toBe(0);
   return skeletonStanceOn(checkout);
+}
+
+// Main working the team's Units itself, with no claim: the walk names the Unit.
+function unclaimedMain(): string {
+  const { remote } = makeSeed(parallelDependencyBody());
+  const checkout = clone(remote, "main-unclaimed");
+  const path = seededStateFile(checkout);
+  writeFileSync(
+    path,
+    readFileSync(path, "utf-8").replace(
+      "- **Unit Gate Rhythm**: per-stage",
+      "- **Unit Gate Rhythm**: per-stage\n- **Skeleton Stance**: on",
+    ),
+  );
+  return checkout;
+}
+
+function cells(projectDir: string, unit: string): string[] {
+  return unitProgressRow(projectDir, unit).split("|").slice(1, -1).map((cell) => cell.trim());
 }
 
 function report(checkout: string, args: string[]): Record<string, unknown> {
@@ -112,6 +134,49 @@ describe("t-team-unit-skip: a team Unit's step in progress is skipped for that U
   test("pin and land take a step skipped for the Unit in place of its documents, review and gate", () => {
     const { seed, remote } = makeSeed();
     prepareCandidate(remote, "alpha", "alpha-team", { skipStages: ["infrastructure-design"] });
+    const pin = runMergeTool(UNIT, ["pin", "alpha"], seed);
+    expect(pin.status, pin.out).toBe(0);
+    // The merge gate names the skipped step instead of calling every stage approved.
+    const ask = pullRequestMergeGateAsk(seed, "alpha");
+    expect(ask?.context).toContain("4 of 5 stages are approved and infrastructure-design is skipped for this Unit");
+    expect(ask?.context).not.toContain("all 5 stages are approved");
     gateAndLand(seed, "alpha");
   });
+
+  test("on main working its own Units, a skip without --unit covers the active Unit only and shows [S]", () => {
+    const checkout = unclaimedMain();
+    const first = nextDirective(checkout);
+    expect(first).toMatchObject({ kind: "run-stage", stage: "functional-design" });
+    const unit = first.unit as string;
+    const other = unit === "alpha" ? "beta" : "alpha";
+    startUnit(checkout, "functional-design", unit);
+
+    const skipped = report(checkout, [
+      "--stage", "functional-design", "--result", "skipped", "--reason", PERSON_ASKED,
+    ]);
+    expect(skipped.kind, JSON.stringify(skipped)).toBe("done");
+    expect(String(skipped.reason)).toContain(`for unit "${unit}" only`);
+    expect(nextDirective(checkout)).toMatchObject({ kind: "run-stage", stage: "nfr-requirements", unit });
+    // Main's Unit Progress shows the step skipped for that Unit, still owed by the other.
+    expect(cells(checkout, unit)[2]).toBe("[S]");
+    expect(cells(checkout, other)[2]).toBe("[ ]");
+  });
+
+  test("on main with no active Unit, a skip without --unit is refused and says to name the Unit", () => {
+    const checkout = unclaimedMain();
+    expect(nextDirective(checkout)).toMatchObject({ kind: "run-stage", stage: "functional-design" });
+    const refused = report(checkout, [
+      "--stage", "functional-design", "--result", "skipped", "--reason", PERSON_ASKED,
+    ]);
+    expect(refused.kind).toBe("error");
+    expect(String(refused.message)).toContain("--unit <unit>");
+    expect(String(refused.message)).toContain("next --skip");
+  });
+
+  test("under the unit-end rhythm with Code Generation skipped, pin and land take the Unit's approval", () => {
+    const { seed, remote } = makeSeed();
+    prepareCandidate(remote, "alpha", "alpha-team", { unitEnd: true, skipStages: ["code-generation"] });
+    gateAndLand(seed, "alpha");
+  });
+
 });
