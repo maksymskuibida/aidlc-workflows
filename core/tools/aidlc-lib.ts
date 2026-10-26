@@ -29384,6 +29384,8 @@ export interface UnitClaimRegistryCache {
 export interface UnitMergeEvidence {
   stages_expected: string[];
   stages_completed: string[];
+  /** Steps skipped for this Unit in this attempt (absent in journals written before skips). */
+  stages_skipped?: string[];
   gates_expected: string[];
   gates_approved: string[];
   reviewers_expected: string[];
