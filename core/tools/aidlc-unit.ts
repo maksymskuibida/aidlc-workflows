@@ -4192,7 +4192,9 @@ function adoptUnit(args: string[], projectDir?: string): void {
 function claimUnit(args: string[], projectDir?: string): void {
   const { positional, flags } = parseArgs(args);
   const unit = positional[0];
-  if (!unit) fail("Usage: aidlc-unit claim <unit> [--team <label>] [--rhythm per-stage|unit-end]");
+  if (!unit) {
+    fail("Usage: aidlc-unit claim <unit> [--team <label>] [--rhythm per-stage|unit-end] [--skip-stages <stage[,stage...]>]");
+  }
   const unitError = validateUnitName(unit);
   if (unitError) fail(unitError);
   if (
@@ -4205,6 +4207,7 @@ function claimUnit(args: string[], projectDir?: string): void {
   const pd = resolveProjectDir(projectDir);
   const state = readStateFile(pd);
   if (!isTeamUnitOwnership(state)) fail("Unit claims require Unit Ownership: team.");
+  const skipStages = claimSkipStages(state, flags["skip-stages"]);
   const identity = activeIdentity(pd);
   validateClaimRefUnit(identity.intentId8, unit);
   const existingStamp = readUnitScopeStamp(pd);
@@ -4331,7 +4334,67 @@ function claimUnit(args: string[], projectDir?: string): void {
     fail(`Unit "${unit}" claim verification failed; current holder is "${winner?.owner ?? "unknown"}".`);
   }
   finalizeClaimCheckout(pd, stamp, winner);
-  console.log(JSON.stringify({ claimed: true, ...stamp }));
+  skipStagesAtClaim(pd, unit, skipStages);
+  console.log(JSON.stringify({
+    claimed: true,
+    ...stamp,
+    ...(skipStages.length > 0 ? { skipped_stages: skipStages } : {}),
+  }));
+}
+
+// `claim --skip-stages`: the Unit's per-Unit Construction stages the person
+// leaves out for this Unit, in plan order. Checked before anything is claimed:
+// each must be one of the plan's per-Unit Construction stages, and Code
+// Generation stays, since it is the work the Unit lands.
+function claimSkipStages(state: string, raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  const named = raw.split(",").map((slug) => slug.trim()).filter(Boolean);
+  if (named.length === 0) fail("--skip-stages needs at least one stage, comma-separated.");
+  const planned = unitMajorConstructionStageSlugs(getField(state, "Scope") ?? "", state, true);
+  for (const slug of named) {
+    if (slug === "code-generation") {
+      fail("--skip-stages cannot leave out code-generation: it is the work the Unit lands. Nothing was claimed.");
+    }
+    if (!planned.includes(slug)) {
+      fail(
+        `--skip-stages names "${slug}", which is not one of this plan's per-Unit Construction stages ` +
+          `(${planned.filter((stage) => stage !== "code-generation").join(", ")}). Nothing was claimed.`,
+      );
+    }
+  }
+  return planned.filter((slug) => named.includes(slug));
+}
+
+// The stages left out at claim are skipped for this Unit only, through the
+// engine's own per-Unit forward jump: one UNIT_SKIPPED per stage, the walk
+// starts at the first stage left in, and the other Units still owe them all.
+function skipStagesAtClaim(projectDir: string, unit: string, stages: string[]): void {
+  if (stages.length === 0) return;
+  const jumpArgs = [
+    "execute",
+    "--target",
+    "code-generation",
+    "--direction",
+    "forward",
+    "--units",
+    unit,
+    "--stages",
+    stages.join(","),
+  ];
+  const [command, ...args] = aidlcEngineCommand(
+    "jump",
+    [...jumpArgs, "--project-dir", projectDir],
+    join(dirname(fileURLToPath(import.meta.url)), "aidlc-jump.ts"),
+    isCompiledExecutable() ? process.execPath : null,
+  );
+  const result = spawnSync(command, args, { cwd: projectDir, encoding: "utf-8" });
+  if (result.status !== 0) {
+    fail(
+      `Unit "${unit}" is claimed, but skipping ${stages.join(", ")} for it failed: ` +
+        `${(result.stderr || result.stdout).trim()}. Skip them with ` +
+        `\`aidlc engine jump ${jumpArgs.join(" ")}\`.`,
+    );
+  }
 }
 
 function releaseUnit(args: string[], projectDir?: string): void {
