@@ -1815,13 +1815,16 @@ function candidateEvidence(
   // UNIT_SKIPPED receipt: it has no documents, review or gate of its own. The
   // Unit's own approval at the end of its walk still counts under unit-end.
   const skipped = new Set(stages.filter((stage) => snapshots.get(stage)?.skipped.has(claim.unit)));
+  // Settled with no work of its own: skipped for this Unit, or one its kind
+  // owes nothing (which cannot be skipped either).
+  const settledWithoutWork = (stage: string): boolean => skipped.has(stage) || notApplicable.has(stage);
   const stagesCompleted = stages.filter((stage) =>
-    skipped.has(stage) || notApplicable.has(stage) || snapshots.get(stage)?.receipts.has(claim.unit)
+    settledWithoutWork(stage) || snapshots.get(stage)?.receipts.has(claim.unit)
   );
   const gatesExpected =
     claim.payload.gate_rhythm === "unit-end"
       ? [stages[stages.length - 1]]
-      : stages.filter((stage) => !skipped.has(stage) && !notApplicable.has(stage));
+      : stages.filter((stage) => !settledWithoutWork(stage));
   const gatesApproved = gatesExpected.filter((stage) =>
     unitGateStatus(
       projectDir,
@@ -1835,7 +1838,7 @@ function candidateEvidence(
   const reviewersReady: string[] = [];
   const artifactPaths: string[] = [];
   for (const stageSlug of stages) {
-    if (skipped.has(stageSlug) || notApplicable.has(stageSlug)) continue;
+    if (settledWithoutWork(stageSlug)) continue;
     const stage = graph.find((entry) => entry.slug === stageSlug);
     if (!stage) fail(`Pinned candidate references unknown stage "${stageSlug}".`);
     const names = filterProducesByKind(
