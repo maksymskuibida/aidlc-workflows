@@ -685,6 +685,7 @@ function completedUnits(state: string): Set<string> {
   const mergedIndex = header.findIndex(
     (cell) => cell.toLowerCase() === "merged",
   );
+  const gateIndex = header.findIndex((cell) => cell.toLowerCase() === "gate");
   const done = new Set<string>();
   for (const cells of table) {
     if (cells.length !== header.length || cells.length < 4) continue;
@@ -699,8 +700,12 @@ function completedUnits(state: string): Set<string> {
       2,
       mergedIndex >= 0 ? mergedIndex : undefined,
     );
+    // A stage skipped for the Unit ([S], as a claim's --skip-stages folds it)
+    // is settled; its gate and merged cells still have to be [x].
     if (
-      workCells.every((cell) => cell === "[x]") &&
+      workCells.every((cell, offset) =>
+        cell === "[x]" || (cell === "[S]" && offset + 2 !== gateIndex)
+      ) &&
       (mergedIndex < 0 || cells[mergedIndex] === "[x]")
     ) {
       done.add(cells[0]);
