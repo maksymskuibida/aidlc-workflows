@@ -784,7 +784,8 @@ export function prepareCandidate(
       unit,
       generation,
       lastStage,
-      `**Gate Scope**: unit-end\n**Gate Stages**: ${stages.join(", ")}\n**User Input**: Approve\n`,
+      // As the engine writes it: the stages the Unit ran, not those skipped for it.
+      `**Gate Scope**: unit-end\n**Gate Stages**: ${stages.filter((stage) => stage === lastStage || !skipStages.has(stage)).join(", ")}\n**User Input**: Approve\n`,
       floor,
     );
   }
