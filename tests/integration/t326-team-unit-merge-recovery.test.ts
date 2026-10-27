@@ -703,6 +703,7 @@ describe("t326 pinned team Unit merge", () => {
     expect(reviewPin.status).not.toBe(0);
     expect(reviewPin.out).toContain("reviewer READY receipts");
     expect(reviewPin.out).toContain(`reviewer READY receipts (${reviewerStage.slug})`);
+    expect(reviewPin.out).toContain("have the stage reviewed again");
 
     const planFixture = makeSeed();
     const planned = prepareCandidate(
