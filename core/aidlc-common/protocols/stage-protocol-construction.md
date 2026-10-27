@@ -300,7 +300,10 @@ uses the `claim/<intent-id8>/<unit>` ref as an atomic registry and writes a
 gitignored checkout-local scope stamp. A stamped checkout executes only that
 Unit's active per-unit Construction stages and gates; every lifecycle, review,
 gate, and fork operation must name the stamped Unit and current attempt
-generation. A terminal `notice` means main is acting as the fan-out dispatcher:
+generation. It lands only `construction/<unit>/` and its audit shard: a
+change a shared record needs (an Inception artifact such as
+`contract-summary.md`, or a stage-level file) is not planned or made there but
+raised for main, where the person makes it. A terminal `notice` means main is acting as the fan-out dispatcher:
 print it verbatim and stop. A participant clone runs `aidlc-unit.ts participate`
 once to opt into the guided picker; the unmarked facilitator main remains the
 notice surface. Release runs only from unscoped main via
