@@ -1532,6 +1532,20 @@ function splitTeamAuditShard(
   });
 }
 
+const OUTSIDE_UNIT_RECORD_TREE = "outside claimed Unit record tree";
+
+// What to do about a record the Unit changed outside its own tree, said with the
+// refusal: a claimed Unit lands only `construction/<unit>/` and its own audit
+// shard, so a shared record is changed on main.
+function ownershipAdvice(unit: string, violations: string[]): string {
+  if (!violations.some((violation) => violation.endsWith(`(${OUTSIDE_UNIT_RECORD_TREE})`))) return "";
+  return ` A claimed Unit lands only construction/${unit}/ and its own audit shard. ` +
+    "A shared record (an Inception artifact such as contract-summary.md, or a stage-level " +
+    "file under construction/<stage>/) is changed on main, not in the Unit's checkout: take " +
+    "it out of the Unit's branch (git rm a file main does not have, or git checkout <base> -- " +
+    "<path> for one it does), commit, and publish again.";
+}
+
 function candidateBoundary(
   projectDir: string,
   baseOid: string,
@@ -1621,7 +1635,7 @@ function candidateBoundary(
       pathKey.startsWith(recordPrefixKey) ||
       pathKey.startsWith("aidlc/")
     ) {
-      violations.push(`${path} (outside claimed Unit record tree)`);
+      violations.push(`${path} (${OUTSIDE_UNIT_RECORD_TREE})`);
       continue;
     }
     outsideUnitRecordPaths.push(path);
@@ -1745,7 +1759,7 @@ function candidateEvidence(
     fail(
       `Pinned candidate violates claimed Unit ownership at: ${
         boundary.violations.join(", ")
-      }.`,
+      }.${ownershipAdvice(claim.unit, boundary.violations)}`,
     );
   }
   const changedAudit = boundary.changedAudit;
@@ -2086,6 +2100,17 @@ function publishUnit(args: string[], projectDir?: string): void {
     headTree,
     headOid,
   );
+  // Pin refuses a record outside the Unit's tree; say so here, before the
+  // candidate is published, rather than at pin.
+  const outside = candidateBoundary(
+    pd, publicationBaseOid, commit, recordPrefix, unit, current.generation, auditShard,
+  ).violations.filter((violation) => violation.endsWith(`(${OUTSIDE_UNIT_RECORD_TREE})`));
+  if (outside.length > 0) {
+    fail(
+      `Unit "${unit}" candidate violates claimed Unit ownership at: ${outside.join(", ")}; ` +
+        `pin would refuse it, so it was not published.${ownershipAdvice(unit, outside)}`,
+    );
+  }
   const pushed = updateClaimRef(pd, remote, stamp.claim_ref, commit, current.oid);
   if (!pushed.ok) {
     if (pushed.refused) {
@@ -3113,7 +3138,7 @@ function assertLandCandidateBoundary(
     fail(
       `Unit "${transaction.unit}" landing violates claimed Unit ownership at: ${
         boundary.violations.join(", ")
-      }.`,
+      }.${ownershipAdvice(transaction.unit, boundary.violations)}`,
     );
   }
 }

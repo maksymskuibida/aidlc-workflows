@@ -29,6 +29,7 @@ import {
   gateAndLand,
   nextDirective,
   unitProgressRow,
+  pushUnprojectedCandidate,
 } from "../harness/team-unit-merge.ts";
 
 // The pinned merge cases are split across four files
@@ -568,9 +569,11 @@ describe("t326 pinned team Unit merge", () => {
     rmSync(teamShard);
     git(shardCandidate.checkout, ["add", "-A"]);
     git(shardCandidate.checkout, ["commit", "-m", "reuse main audit shard"]);
-    expect(
-      runMergeTool(UNIT, ["publish", "alpha"], shardCandidate.checkout).status,
-    ).toBe(0);
+    // Publish refuses it first; pin refuses it on its own for a candidate pushed around that check.
+    const shardPublish = runMergeTool(UNIT, ["publish", "alpha"], shardCandidate.checkout);
+    expect(shardPublish.status).not.toBe(0);
+    expect(shardPublish.out).toContain("main-built-skeleton.md");
+    pushUnprojectedCandidate(shardCandidate.checkout, "alpha");
     const badShard = runMergeTool(UNIT, ["pin", "alpha"], shardFixture.seed);
     expect(badShard.status).not.toBe(0);
     expect(badShard.out).toContain("inherited audit shard");
@@ -596,7 +599,8 @@ describe("t326 pinned team Unit merge", () => {
     git(journalCandidate.checkout, ["commit", "-m", "force merge journal"]);
     expect(
       runMergeTool(UNIT, ["publish", "alpha"], journalCandidate.checkout).status,
-    ).toBe(0);
+    ).not.toBe(0);
+    pushUnprojectedCandidate(journalCandidate.checkout, "alpha");
     const journalPin = runMergeTool(UNIT, ["pin", "alpha"], journalFixture.seed);
     expect(journalPin.status).not.toBe(0);
     expect(journalPin.out).toContain("engine merge journals");
