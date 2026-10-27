@@ -159,6 +159,12 @@ function git(projectDir: string, args: string[], env?: NodeJS.ProcessEnv): GitRe
   return { ...result, stdout: result.stdout.toString("utf-8") };
 }
 
+// Why a git command failed: git commit reports some refusals ("nothing to
+// commit", a hook's own words) on stdout, so stderr alone can be empty.
+function gitFailure(result: GitResult): string {
+  return result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`;
+}
+
 function localGit(
   projectDir: string,
   args: string[],
@@ -1548,7 +1554,7 @@ function splitTeamAuditShard(
         `The rows this branch appended to it now open ${teamShard}; ${cloneShard} is as main has it.`,
       "--", clonePath, teamPath,
     ]);
-    if (!committed.ok) fail(`Cannot commit the audit shard split: ${committed.stderr.trim()}`);
+    if (!committed.ok) fail(`Cannot commit the audit shard split: ${gitFailure(committed)}`);
     return true;
   });
 }
@@ -2972,7 +2978,7 @@ function checkpointMainMetadata(
     message,
   ]);
   if (!committed.ok) {
-    fail(`Failed to checkpoint main engine metadata: ${committed.stderr.trim()}.`);
+    fail(`Failed to checkpoint main engine metadata: ${gitFailure(committed)}.`);
   }
   return {
     parentOid,
@@ -3636,7 +3642,7 @@ function landGit(
     git(projectDir, ["merge", "--abort"]);
     working = rollbackMetadataCheckpoint(projectDir, working);
     writeUnitMergeTransaction(projectDir, working);
-    fail(`Pinned git merge commit failed: ${committed.stderr.trim()}.`);
+    fail(`Pinned git merge commit failed: ${gitFailure(committed)}.`);
   }
   const commitOid = gitOutput(
     projectDir,
@@ -5112,7 +5118,7 @@ function finishUnit(args: string[], projectDir?: string): void {
     const shardPath = shard ? `${recordPrefix}/audit/${shard}` : `${recordPrefix}/audit`;
     git(pd, ["add", "--", shardPath]);
     const committed = git(pd, ["commit", "-m", `Acknowledge Unit ${unit} merge drift`, "--", shardPath]);
-    if (!committed.ok) fail(`Cannot commit the drift acknowledgment: ${committed.stderr.trim()}`);
+    if (!committed.ok) fail(`Cannot commit the drift acknowledgment: ${gitFailure(committed)}`);
     const pushed = git(pd, ["push", "-u", integration.remote, branch]);
     if (!pushed.ok) fail(`Cannot push "${branch}": ${pushed.stderr.trim()}`);
     const { body, notice } = pullRequestBody(pd, WORKSPACE_REPO, null, [
