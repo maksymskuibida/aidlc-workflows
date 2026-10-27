@@ -1982,7 +1982,12 @@ function candidateEvidence(
     incomplete.push("transportable audit shard");
   }
   if (incomplete.length > 0) {
-    fail(`Pinned candidate evidence is incomplete: ${incomplete.join(", ")}.`);
+    // A missing READY is usually a stale one: a reviewed file changed after it.
+    const reviewAdvice = reviewersReady.length !== reviewersExpected.length
+      ? " A stage's READY counts only while the files it reviewed are unchanged: in the Unit's checkout, " +
+        "have the stage reviewed again, commit, publish and pin again."
+      : "";
+    fail(`Pinned candidate evidence is incomplete: ${incomplete.join(", ")}.${reviewAdvice}`);
   }
   return evidence;
 }

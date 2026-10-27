@@ -2106,6 +2106,36 @@ describe("AttemptView projections and refusal streaks", () => {
     ).toBe(true);
   });
 
+  test("candidate coverage stays READY when only the stage diary changes after the review", () => {
+    const fingerprint = `sha256:${"a".repeat(64)}`;
+    const fields = {
+      Stage: "functional-design",
+      Unit: "alpha",
+      "Attempt Generation": "1",
+      Reviewer: "reviewer",
+      Iteration: "1",
+      "Artifact Fingerprint": fingerprint,
+      "Review Appendix Artifact": "construction/alpha/functional-design/entities.md",
+      "Review Appendix Offset": "0",
+    };
+    const request = event("REVIEW_REQUESTED", "2026-08-28T00:00:01Z", fields, "a.md", 0);
+    const completion = event("REVIEW_COMPLETED", "2026-08-28T00:00:02Z", { ...fields, Verdict: "READY" }, "a.md", 0, 1);
+    const updated = (file: string) =>
+      event("ARTIFACT_UPDATED", "2026-08-28T00:00:03Z", { File: `aidlc/construction/alpha/functional-design/${file}` }, "a.md", 0, 2);
+    const options = {
+      unit: "alpha",
+      generation: 1,
+      stage: "functional-design",
+      reviewer: "reviewer",
+      artifactPrefix: "construction/alpha/functional-design/",
+      expectedFingerprint: fingerprint,
+    };
+    // The learnings step writes the Unit's stage diary after the review: not the reviewed work.
+    expect(candidateReviewCoverageProjection([request, completion, updated("memory.md")], options)).toBe(true);
+    // A reviewed artifact changed after the review still needs a new one.
+    expect(candidateReviewCoverageProjection([request, completion, updated("entities.md")], options)).toBe(false);
+  });
+
   test("candidate coverage fails closed on a cross-shard tie", () => {
     const request = event(
       "REVIEW_REQUESTED",
