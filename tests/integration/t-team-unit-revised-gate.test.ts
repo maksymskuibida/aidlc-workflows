@@ -11,10 +11,17 @@
 
 import { NATIVE_MULTI_WORKTREE_CASE_TIMEOUT_MS } from "../harness/test-budget.ts";
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AIDLC_SRC, seededRecordDir, seededStateFile } from "../harness/fixtures.ts";
-import { unitGateStatus } from "../../dist/claude/.claude/tools/aidlc-lib.ts";
+import {
+  GUARD_RECOVERY_ASK_TYPE,
+  readStateFile,
+  stateDigest,
+  unitGateStatus,
+  writeActiveDirectiveMarker,
+} from "../../dist/claude/.claude/tools/aidlc-lib.ts";
 import {
   cleanupTempDirs,
   makeSeed,
@@ -104,5 +111,43 @@ describe("t-team-unit-revised-gate: a team Unit's revised gate takes the person'
     const approved = report(checkout, ["--result", "approved", "--user-input", "Approve"]);
     expect(approved.kind, JSON.stringify(approved)).toBe("done");
     expect(unitGateStatus(checkout, "code-generation", "alpha", "per-stage")).toBe("approved");
+  });
+
+  // The gate refused once on the way (a review it wanted was missing): the
+  // recovery question it asked stood as the engine's step after the review was
+  // recorded, because the revised report `next` then names is a printed step
+  // that publishes none. The plan-approval guard judged that report by the
+  // stale question and refused it (seen on ReviewDesk u16-menus-settings):
+  // "Code Generation cannot start: the current state has no matching v2
+  // code-generation active directive".
+  test("the revised report next names passes the plan guard after a recovery question", () => {
+    const checkout = reopenedAndRebuilt();
+    writeActiveDirectiveMarker(checkout, {
+      kind: "ask",
+      ask_type: GUARD_RECOVERY_ASK_TYPE,
+      stage: "functional-design",
+      unit: "alpha",
+      state_sha256: stateDigest(readStateFile(checkout)),
+      remedies: [{
+        op: "redo-jump",
+        label: "Start the stage over",
+        action: "Restart the stage from the top with /aidlc --stage functional-design.",
+        interaction: "command",
+        operation: { kind: "restart-stage", stage: "functional-design" },
+      }],
+    });
+    const step = nextDirective(checkout);
+    expect(step.kind, JSON.stringify(step)).toBe("print");
+    const command = /`([^`]* report --stage code-generation --unit alpha --result revised)`/.exec(String(step.message))?.[1];
+    expect(command, String(step.message)).toBeDefined();
+    // As an installed engine runs it (the fixture prints the source tool's spelling).
+    const installed = command!.replace(/^bun \S*aidlc-orchestrate\.ts /, "aidlc engine orchestrate ");
+    const guard = spawnSync(process.execPath, [join(AIDLC_SRC, "hooks", "aidlc-plan-approval-guard.ts")], {
+      cwd: checkout,
+      input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: installed } }),
+      env: { ...process.env, CLAUDE_PROJECT_DIR: checkout, AIDLC_UNATTENDED: "0" },
+      encoding: "utf-8",
+    });
+    expect(guard.status, guard.stderr).toBe(0);
   });
 });

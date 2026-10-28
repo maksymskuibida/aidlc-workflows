@@ -1750,6 +1750,16 @@ function prepareEmission(directive: Directive): PreparedEmission {
       state_sha256: markerStateHash,
     };
   }
+  const standsFor = transported.kind === "print" && marker === undefined ? printStepFor.get(requested) : undefined;
+  const standsForRoute = standsFor ? runStageRoutes.get(standsFor) : undefined;
+  if (standsFor && standsForRoute?.stateHash) {
+    marker = {
+      kind: "run-stage",
+      stage: standsFor.stage,
+      ...(standsFor.unit ? { unit: standsFor.unit } : {}),
+      state_sha256: standsForRoute.stateHash,
+    };
+  }
   if (transported.kind === "invoke-swarm" && publication) {
     marker = {
       kind: "invoke-swarm",
@@ -1764,6 +1774,8 @@ function prepareEmission(directive: Directive): PreparedEmission {
     resultSha256: sha256(serialized),
     ...(route
       ? { projectDir: route.codekbCtx.projectDir }
+      : standsForRoute?.stateHash
+        ? { projectDir: standsForRoute.codekbCtx.projectDir }
       : publication
         ? { projectDir: publication.projectDir }
         : marker?.kind === "ask" && engineProjectDir
@@ -2310,6 +2322,8 @@ function withParkedReply(directive: Directive): Directive {
 
 function emit(requested: Directive): void {
   const directive = withBuiltPlanReviewRoute(withPlanApprovalRoute(requested));
+  const standsFor = printStepFor.get(requested);
+  if (standsFor) printStepFor.set(directive, standsFor);
   // A refusal that offers building the plan anyway keeps when it was first
   // shown, so a reply of the person's after it can be told from one before.
   if (planApprovalOverrideOffers.has(directive) && !isReadOnlyEngineProbe()) {
@@ -6562,6 +6576,10 @@ const turnEndingPrints = new WeakSet<Directive>();
 // A plan change the person asked for while the code plan's question is open:
 // the question stays the published step (emit does not replace it).
 const planWaitPrints = new WeakSet<Directive>();
+// A printed step that stands for a run-stage of the walk: emit publishes that
+// run-stage as the engine's step, so the step it replaces (a recovery question
+// the work has answered since) does not stand after it.
+const printStepFor = new WeakMap<Directive, RunStageDirective>();
 const hookRefusalAsks = new WeakSet<Directive>();
 const publicationContexts = new WeakMap<
   Directive,
@@ -10974,11 +10992,16 @@ function gateOwesItsReport(projectDir: string, stateContent: string, node: Stage
   return changes.some((change) => !changeAlreadyAccepted(projectDir, change, events));
 }
 
-function revisedUnitGateStep(stage: GraphStage, unit: string): Directive {
-  return printDirective(
+// The step is the Unit's gate: it is published as the engine's step, so the
+// plan-approval guard reads the report against this Unit's Code Generation and
+// not a recovery question asked on the way (printStepFor).
+function revisedUnitGateStep(stage: GraphStage, unit: string, gate: RunStageDirective): Directive {
+  const step = printDirective(
     `Unit "${unit}"'s ${stage.name} is done again after the changes asked for: run \`${aidlcToolInvocation("orchestrate")} ` +
       `report --stage ${shellArg(stage.slug)} --unit ${shellArg(unit)} --result revised\` and show the gate with what it returns.`,
   );
+  printStepFor.set(step, gate);
+  return step;
 }
 
 // Reuse the settled run-stage surface without re-entering body or review work.
@@ -13325,7 +13348,7 @@ function emitTeamUnitMajorRunStage(
     // open: the revision's report puts it to them again, as a solo stage's
     // does, and only then does their answer record.
     if (unitGateStatus(projectDir, step.stage.slug, unit, directive.unit_gate, auditRows) === "revising") {
-      emit(revisedUnitGateStep(step.stage, unit));
+      emit(revisedUnitGateStep(step.stage, unit, directive));
       return;
     }
     emit(applyGateOnlyShape(directive, projectDir, refreshedState));
