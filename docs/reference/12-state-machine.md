@@ -199,7 +199,9 @@ for at that question for one listed stage is `next --stage <stage> --unit
 <unit> --change` (or `--every-unit`): the print names `aidlc-jump.ts reopen ...
 --via change`, whose Unit-scoped `GATE_REJECTED` carries `Reopen: change`,
 `User Input: Request Changes` and the person's words since the question as
-`Feedback`. While the gate stays open, `next` routes the reopened Units' steps
+`Feedback` (`--feedback <words>` brings them along instead, as `aidlc unit claim
+<unit> --reopen` does with the person's reason for each stage the reopened
+attempt works). While the gate stays open, `next` routes the reopened Units' steps
 first, then shows the same one question again, without the learnings module. A
 stage being revised never lists the learnings module again, and `report
 --result awaiting-approval` on it names `report --result revised`. At an open

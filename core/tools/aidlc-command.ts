@@ -223,8 +223,10 @@ export const UNIT_GRAMMAR: Readonly<Record<string, UnitGrammar>> = {
   adopt: { name: true, options: [], usage: "unit adopt <unit>" },
   claim: {
     name: true,
-    options: ["team", "request-file", "rhythm"],
-    usage: "unit claim <unit> [--team <label> | --request-file <file>] [--rhythm per-stage|unit-end]",
+    options: ["team", "request-file", "rhythm", "user-input"],
+    switches: ["reopen"],
+    usage: "unit claim <unit> [--team <label> | --request-file <file>] [--rhythm per-stage|unit-end] " +
+      "[--reopen --user-input <why>]",
   },
   gate: {
     name: true,
