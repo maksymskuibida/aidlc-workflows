@@ -1730,6 +1730,23 @@ export function auditBlockField(block: string, fieldName: string): string | null
   return null;
 }
 
+// Each Unit's landed attempts, from its UNIT_MERGED receipts: the Attempt
+// Generation each landing carries, with the landing's timestamp.
+export function unitLandedAttempts(
+  rows: ReadonlyArray<{ event: string; block: string; timestamp?: string }>,
+): Map<string, Map<number, string>> {
+  const landed = new Map<string, Map<number, string>>();
+  for (const row of rows) {
+    if (row.event !== "UNIT_MERGED") continue;
+    const unit = auditBlockField(row.block, "Unit");
+    const generation = Number(auditBlockField(row.block, "Attempt Generation"));
+    if (!unit || !Number.isInteger(generation)) continue;
+    if (!landed.has(unit)) landed.set(unit, new Map());
+    landed.get(unit)!.set(generation, row.timestamp ?? "");
+  }
+  return landed;
+}
+
 export function gateStagesFromBlock(block: string): string[] {
   const explicit = auditBlockField(block, "Gate Stages");
   if (explicit) {

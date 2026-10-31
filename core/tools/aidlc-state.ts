@@ -293,7 +293,7 @@ import {
   swarmWorkerWorktreeMeta,
   UNIT_NAME_PLACEHOLDER,
 } from "./aidlc-lib.js";
-import { chatTookStepHere, withdrawnTurnPositions } from "./aidlc-record-core.ts";
+import { chatTookStepHere, unitLandedAttempts, withdrawnTurnPositions } from "./aidlc-record-core.ts";
 import { personGitNameField } from "./aidlc-git-name.ts";
 import {
   mainCheckoutChangeStep, personTurnStands, proveMessage, readMessage, requestMessageStep, standingPersonTurn,
@@ -2371,6 +2371,7 @@ function handleFoldUnitMerge(args: string[]): void {
     error(`Unit "${unit}" merge attempt generation is no longer current.`);
   }
 
+  const rerun = rerunAfterReopenedLanding(pd, unit, generation);
   const liveState = readStateFile(pd);
   if (!isTeamUnitOwnership(liveState)) {
     error("Unit merge folding requires Unit Ownership: team.");
@@ -2425,7 +2426,47 @@ function handleFoldUnitMerge(args: string[]): void {
     unit,
     pinned_oid: pinnedOid,
     generation,
+    ...(rerun.length > 0 ? { stages_to_run_again: rerun } : {}),
   }));
+}
+
+// A Unit claimed again with --reopen lands its new attempt on a main that had
+// gone on past the per-Unit stages (Build and Test failed, or a later check
+// did): every stage main did after them runs again. Main goes back to the last
+// per-Unit stage and the fold then starts the first stage after it, as it does
+// for any last landing. Nothing changes for a Unit's first landing, or while
+// main is still on the per-Unit stages. Returns the stages that run again.
+function rerunAfterReopenedLanding(pd: string, unit: string, generation: number): string[] {
+  const landedBefore = [...(unitLandedAttempts(readAuditShardEvents(pd)).get(unit)?.keys() ?? [])]
+    .some((landed) => landed < generation);
+  if (!landedBefore) return [];
+  let content = readStateFile(pd);
+  const block = unitMajorConstructionStageSlugs(getField(content, "Scope") ?? "", content, true);
+  const graph = loadStageGraph();
+  const lastBlock = graph.findIndex((stage) => stage.slug === block.at(-1));
+  const current = graph.findIndex((stage) => stage.slug === (getField(content, "Current Stage") ?? "").trim());
+  if (lastBlock === -1 || current <= lastBlock) return [];
+  const states = new Map(parseCheckboxes(content).map((entry) => [entry.slug, entry.state]));
+  const rerun: string[] = [];
+  for (const stage of graph.slice(lastBlock + 1)) {
+    const state = states.get(stage.slug);
+    if (state === undefined || state === "pending" || state === "skipped") continue;
+    content = setCheckbox(content, stage.slug, "pending");
+    rerun.push(stage.slug);
+  }
+  const blockPhase = graph[lastBlock].phase;
+  for (const phase of PHASES.slice((PHASES as readonly string[]).indexOf(blockPhase) + 1)) {
+    if (graph.some((stage) => stage.phase === phase && rerun.includes(stage.slug))) {
+      content = setPhaseProgress(content, phase, "Pending");
+    }
+  }
+  content = setPhaseProgress(content, blockPhase, "Active");
+  content = setField(content, "Lifecycle Phase", blockPhase.toUpperCase());
+  content = setField(content, "Current Stage", graph[lastBlock].slug);
+  content = setField(content, "Status", "Running");
+  content = setField(content, "Last Updated", isoTimestamp());
+  writeStateFile(pd, content);
+  return rerun;
 }
 
 function handleSyncUnitScopeStage(args: string[]): void {

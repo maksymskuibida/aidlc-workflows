@@ -129,7 +129,7 @@ import {
   resolveTestingPosture,
 } from "./aidlc-testing-posture.ts";
 import { beforePerUnitBlock, memoryDirFor } from "./aidlc-graph.ts";
-import { planMadeElsewhere } from "./aidlc-record-core.ts";
+import { planMadeElsewhere, unitLandedAttempts } from "./aidlc-record-core.ts";
 import { approvalDecidesOpenFindings, approvalOpenFindings } from "./aidlc-review-brief.ts";
 import {
   aidlcEngineCommand,
@@ -221,6 +221,8 @@ export interface UnitClaimPayload {
   audit_shard?: string;
   candidate_tree_oid?: string;
   candidate_head_oid?: string;
+  /** A landed Unit claimed again (`claim --reopen`): the attempt that landed, and the person's reason. */
+  reopen?: { landed_generation: number; reason: string };
 }
 
 export interface UnitClaimView {
@@ -541,6 +543,10 @@ function readPayload(
       (
         parsed.candidate_head_oid !== undefined &&
         !/^[0-9a-f]{40}$/.test(parsed.candidate_head_oid)
+      ) ||
+      (
+        parsed.reopen !== undefined &&
+        (!Number.isInteger(parsed.reopen?.landed_generation) || typeof parsed.reopen?.reason !== "string")
       )
     ) {
       return null;
@@ -549,6 +555,12 @@ function readPayload(
   } catch {
     return null;
   }
+}
+
+// The reopen a claim commit carries (`claim --reopen`), read from this
+// checkout's own objects: its scope stamp names the commit.
+export function claimReopenAt(projectDir: string, oid: string): UnitClaimPayload["reopen"] | null {
+  return readPayload(projectDir, oid, { localOnly: true })?.reopen ?? null;
 }
 
 function ensureObject(
@@ -808,19 +820,50 @@ type OpeningStatus = {
   // once its stages are approved, before the Unit is landed.
   landed: Set<string>;
   skeleton: string;
+  /** Each Unit's newest attempt that landed, from its UNIT_MERGED receipts. */
+  landedGeneration: Map<string, number>;
 };
 
 function openingStatus(projectDir: string, baseOid: string): OpeningStatus {
   return openingStatusFrom(
     stateAtOid(projectDir, baseOid),
     dependencyBodyAtOid(projectDir, baseOid),
+    landedAttemptsAt(projectDir, baseOid),
   );
 }
 
 function localOpeningStatus(projectDir: string): OpeningStatus {
   const state = readStateFile(projectDir);
   const dependencyBody = readFileSync(unitDependencyPath(projectDir), "utf-8");
-  return openingStatusFrom(state, dependencyBody);
+  return openingStatusFrom(state, dependencyBody, landedAttempts(readAuditShardEvents(projectDir)));
+}
+
+// Each Unit's newest attempt that landed: the Attempt Generation its
+// UNIT_MERGED receipts carry. A Unit claimed again with --reopen has a newer
+// attempt than this until that attempt lands too.
+function landedAttempts(rows: ReadonlyArray<{ event: string; block: string }>): Map<string, number> {
+  return new Map([...unitLandedAttempts(rows)].map(([unit, attempts]) => [unit, Math.max(...attempts.keys())]));
+}
+
+function landedAttemptsAt(projectDir: string, oid: string): Map<string, number> {
+  const relative = relativeRecordDir(projectDir);
+  if (!relative) return new Map();
+  const listed = git(projectDir, ["ls-tree", "-r", "--name-only", oid, "--", `${relative}/audit`]);
+  const shards = listed.ok ? listed.stdout.split(/\r?\n/).filter((path) => path.endsWith(".md")) : [];
+  return landedAttempts(candidateAuditEvents(projectDir, oid, shards));
+}
+
+// A claim whose attempt has not landed yet. The claim a landing leaves on its
+// ref (the landed attempt, still "claimed") is not open; a landed Unit claimed
+// again with --reopen is, until its new attempt lands.
+function openClaim(claim: UnitClaimView | undefined, landed: number | undefined): boolean {
+  return claim?.status === "claimed" && claim.generation > (landed ?? 0);
+}
+
+// A complete Unit is claimed again only after it landed: a row marked complete
+// with no landing on record (a hand edit) leaves its claim where it was.
+function reopenedClaim(claim: UnitClaimView | undefined, landed: number | undefined): boolean {
+  return landed !== undefined && openClaim(claim, landed);
 }
 
 // Claims can open from what this checkout holds: no walking skeleton is still
@@ -839,7 +882,11 @@ export function claimsOpenHere(projectDir: string): boolean {
 // board. The walking skeleton is the first DAG Unit, built on main; while it is
 // on, every Unit waits until its Unit Progress row is complete, the same
 // evidence a dependency is read from.
-function openingStatusFrom(state: string, dependencyBody: string): OpeningStatus {
+function openingStatusFrom(
+  state: string,
+  dependencyBody: string,
+  landedGeneration: Map<string, number> = new Map(),
+): OpeningStatus {
   if (!isTeamUnitOwnership(state)) fail("Unit claims require Unit Ownership: team.");
   const parsed = parseBoltDag(dependencyBody);
   if (!parsed.ok) fail(`Cannot resolve Unit dependencies: ${parsed.reason}: ${parsed.detail}`);
@@ -853,7 +900,7 @@ function openingStatusFrom(state: string, dependencyBody: string): OpeningStatus
     blockers.set(edge.name, [...new Set(waiting)]);
   }
   const landed = new Set([...completed].filter((unit) => unitRowMerged(state, unit)));
-  return { units: parsed.units.map((edge) => edge.name), blockers, completed, landed, skeleton };
+  return { units: parsed.units.map((edge) => edge.name), blockers, completed, landed, skeleton, landedGeneration };
 }
 
 function allClaims(
@@ -886,7 +933,9 @@ function buildOverview(
   const walkedUnits: string[] = [];
   for (const unit of opening.units) {
     const claim = claims.get(unit);
-    if (opening.completed.has(unit)) {
+    // A landed Unit stays complete on main while it is claimed again; its open
+    // claim is listed with the others.
+    if (opening.completed.has(unit) && !reopenedClaim(claim, opening.landedGeneration.get(unit))) {
       if (claim?.status === "claimed" && opening.landed.has(unit)) claim.landed = true;
       continue;
     }
@@ -928,6 +977,7 @@ function cacheClaims(
   const identity = activeIdentity(projectDir);
   const priorCache = readUnitClaimRegistryCache(projectDir);
   const cached: Record<string, CachedUnitClaim> = {};
+  let landedHere: Map<string, number> | null = null;
   for (const [unit, claim] of claims) {
     const prior =
       priorCache?.space === identity.space &&
@@ -950,7 +1000,8 @@ function cacheClaims(
       observed_at: nextObservedAt,
     };
     if (claim.status === "claimed") {
-      writeClaimGeneration(projectDir, unit, claim.generation);
+      landedHere ??= landedAttempts(readAuditShardEvents(projectDir));
+      writeClaimGeneration(projectDir, unit, attemptOnRecord(projectDir, claim, landedHere.get(unit)));
     } else {
       clearClaimGeneration(projectDir, unit);
     }
@@ -963,6 +1014,16 @@ function cacheClaims(
     ...(warning ? { warning } : {}),
   });
   return claims;
+}
+
+// The attempt this checkout reads a Unit's records by. A landed Unit claimed
+// again keeps its landed attempt on record until this checkout pins the new
+// one (pin, gate and land read the new attempt) or its UNIT_MERGED receipt
+// arrives, so main's row for it, and the Units that wait on it, do not change
+// while the new attempt is worked.
+function attemptOnRecord(projectDir: string, claim: UnitClaimView, landed: number | undefined): number {
+  if (!landed || claim.generation <= landed) return claim.generation;
+  return readUnitMergeTransaction(projectDir, claim.unit)?.generation === claim.generation ? claim.generation : landed;
 }
 
 interface UnitClaimIdentity {
@@ -2731,8 +2792,13 @@ function pinUnit(args: string[], projectDir?: string): void {
   const ref = claimRef(identity.intentId8, unit);
   const claim = currentClaim(pd, integration.remote, ref);
   let superseded: UnitMergeTransaction | null = null;
+  // A Unit claimed again with --reopen: its earlier attempt's landing is done,
+  // and the new attempt is pinned in its place.
+  const landedEarlierAttempt = inFlight?.status === "complete" &&
+    claim?.status === "claimed" && claim.generation > inFlight.generation;
   if (
     inFlight &&
+    !landedEarlierAttempt &&
     inFlight.space === identity.space &&
     inFlight.intent_uuid === identity.intentUuid &&
     ["approved", "git-landed", "state-folded", "complete"].includes(
@@ -2792,8 +2858,9 @@ function pinUnit(args: string[], projectDir?: string): void {
     audit_shard: claim.payload.audit_shard,
     evidence,
   };
-  updateCachedClaim(pd, claim);
+  // The journal first: the cache then reads a reopened Unit's pinned attempt as the one on record.
   writeUnitMergeTransaction(pd, transaction);
+  updateCachedClaim(pd, claim);
   console.log(JSON.stringify({
     pinned: true,
     unit,
@@ -4457,6 +4524,13 @@ function claimUnit(args: string[], projectDir?: string): void {
   ) {
     fail(`Invalid --rhythm "${flags.rhythm}"; expected per-stage or unit-end.`);
   }
+  // --reopen claims a landed Unit again as a new attempt, for the reason the
+  // person gave; nothing on main changes until that attempt lands.
+  const reopen = flags.reopen !== undefined;
+  const reason = (flags["user-input"] ?? "").trim();
+  if (reopen && (reason.length === 0 || reason === "true")) {
+    fail(`--reopen needs the person's reason: --user-input '<why ${unit} goes back to work>'. Nothing was claimed.`);
+  }
   const pd = resolveProjectDir(projectDir);
   // The team name in the file `next --claim` wrote for this command, so no
   // shell read it on the way; spent once the claim holds.
@@ -4485,7 +4559,10 @@ function claimUnit(args: string[], projectDir?: string): void {
       repositoryRemote(pd),
       existingStamp.claim_ref,
     );
+    // With --reopen, a stamp left by the landed attempt is not recovered: only an
+    // interrupted reopen of its own (its live claim is a reopen) is.
     if (
+      (!reopen || recovered?.payload.reopen !== undefined) &&
       recovered?.status === "claimed" &&
       recovered.payload.intent_uuid === identity.intentUuid &&
       recovered.unit === unit &&
@@ -4512,8 +4589,15 @@ function claimUnit(args: string[], projectDir?: string): void {
     : null;
   const opening = openingStatus(pd, integration.oid);
   if (!opening.units.includes(unit)) fail(`Unit "${unit}" is not in the authoritative Unit DAG.`);
-  if (opening.completed.has(unit)) {
-    fail(`Unit "${unit}" is already complete on the integration ref.`);
+  const landed = opening.landedGeneration.get(unit) ?? 0;
+  if (opening.completed.has(unit) && !reopen) {
+    fail(
+      `Unit "${unit}" is already complete on the integration ref. To send it back to work, claim it again ` +
+        `as a new attempt: \`aidlc unit claim ${unit} --reopen --user-input '<why>'\`.`,
+    );
+  }
+  if (reopen && !opening.completed.has(unit)) {
+    fail(`Unit "${unit}" has not landed, so there is nothing to reopen; claim it as usual. Nothing was claimed.`);
   }
   const blockers = opening.blockers.get(unit) ?? [];
   if (blockers.length > 0) {
@@ -4527,7 +4611,8 @@ function claimUnit(args: string[], projectDir?: string): void {
   }
   const ref = claimRef(identity.intentId8, unit);
   const current = currentClaim(pd, integration.remote, ref);
-  if (current?.status === "claimed") {
+  // The claim a landing leaves on its ref is the landed attempt, not a live one.
+  if (current?.status === "claimed" && (!reopen || openClaim(current, landed))) {
     fail(`Unit "${unit}" is already claimed by "${current.owner}".`);
   }
   // Another checkout was building it without a claim (#3610): the person asked
@@ -4537,10 +4622,14 @@ function claimUnit(args: string[], projectDir?: string): void {
     ? `Unit "${unit}" was being built in the checkout that started it, before any team took a Unit; from now on ` +
       "it is yours, and that checkout sees it claimed."
     : null;
-  const generation =
+  // A reopened Unit's attempt comes after the one that landed, also when its
+  // claim ref is gone (a pull-request landing's finish deletes it).
+  const generation = Math.max(
     current?.status === "released"
       ? current.generation
-      : (current?.generation ?? 0) + 1;
+      : (current?.generation ?? 0) + 1,
+    reopen ? landed + 1 : 0,
+  );
   const nonce = randomUUID();
   const owner = claimOwnerLabel(pd, team);
   // Pin takes exactly one newly added team shard (candidateBoundary). A
@@ -4573,6 +4662,7 @@ function claimUnit(args: string[], projectDir?: string): void {
     predecessor_oid: current?.oid ?? null,
     gate_rhythm: rhythm,
     audit_shard: auditShard,
+    ...(reopen ? { reopen: { landed_generation: landed, reason } } : {}),
   };
   const commit = createClaimCommit(pd, current?.oid ?? integration.oid, payload);
   const stamp: UnitScopeStamp = {
@@ -4614,9 +4704,43 @@ function claimUnit(args: string[], projectDir?: string): void {
   if (recordPrefix && auditShard !== ownShard) {
     moveClaimTurnRows(pd, `${recordPrefix}/audit/${ownShard}`, `${recordPrefix}/${ENGINE_DIR}/audit/${auditShard}`, integration.oid);
   }
+  if (reopen) reopenAttemptStages(pd, unit, reason);
   spend();
   const warning = [planWarning, walkedWarning].filter((line): line is string => !!line).join(" ");
-  console.log(JSON.stringify({ claimed: true, ...stamp, ...(warning ? { warning } : {}) }));
+  console.log(JSON.stringify({
+    claimed: true,
+    ...stamp,
+    ...(warning ? { warning } : {}),
+    ...(payload.reopen ? { reopen: payload.reopen } : {}),
+  }));
+}
+
+// The stages a reopened attempt works are reopened for its Unit through the
+// engine's own per-Unit reopen, as the change the person asked for with their
+// reason, the way a Request Changes at the Unit's gate is: each starts from
+// the landed attempt's documents as a revision (an unchanged approved plan is
+// revised before it is asked about), not as a first run whose earlier files
+// ask to be kept or redone.
+function reopenAttemptStages(pd: string, unit: string, reason: string): void {
+  const content = readStateFile(pd);
+  const stages = unitMajorConstructionStageSlugs(getField(content, "Scope") ?? "", content, true);
+  if (stages.length === 0) return;
+  const reopenArgs = [
+    "reopen", "--target", stages[0], "--stages", stages.join(","), "--units", unit, "--via", "change", "--feedback", reason,
+  ];
+  const [command, ...args] = aidlcEngineCommand(
+    "jump",
+    [...reopenArgs, "--project-dir", pd],
+    join(dirname(fileURLToPath(import.meta.url)), "aidlc-jump.ts"),
+    isCompiledExecutable() ? process.execPath : null,
+  );
+  const result = spawnSync(command, args, { cwd: pd, encoding: "utf-8" });
+  if (result.status !== 0) {
+    fail(
+      `Unit "${unit}" is claimed again, but reopening its stages for this attempt failed: ` +
+        `${(result.stderr || result.stdout).trim()}. Reopen them with \`aidlc engine jump ${reopenArgs.join(" ")}\`.`,
+    );
+  }
 }
 
 // A checkout whose own shard main already holds claims into a shard of the
@@ -4704,7 +4828,7 @@ function releaseUnit(args: string[], projectDir?: string): void {
     );
   }
   const opening = openingStatus(pd, integration.oid);
-  if (opening.completed.has(unit)) {
+  if (opening.completed.has(unit) && !reopenedClaim(current, opening.landedGeneration.get(unit))) {
     fail(
       `Unit "${unit}" is already complete/merged on the integration ref; release is refused.`,
     );

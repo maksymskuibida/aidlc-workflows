@@ -22,6 +22,18 @@ asked about again. Only a cause that spans every unit, or cannot be pinned to
 one, reopens Code Generation for every unit. Either way the stages before Code
 Generation keep their work. Below, an "applicable unit" is a reopened one.
 
+**Team-owned units** (`Unit Ownership: team`). A unit that has landed on main
+is not reopened from main: it goes back to work by being claimed again as a new
+attempt, in its owner's checkout, with `aidlc unit claim <unit> --reopen
+--user-input '<the person's reason>'`. Main's records do not change until that
+attempt lands, so the other units keep their work and stay claimable. It runs
+every per-unit stage again. The attempt works as a Request Changes at the unit's gate,
+with the reason as the change. Main's Build and Test, and every stage after it,
+waits while any claim's attempt has not landed; when the reopened unit lands
+again, every stage main had done from Build and Test on runs again. A unit still
+claimed and not landed is reopened in its own checkout with `next --stage
+<stage> --unit <unit>`.
+
 **The loop-back counter** lives in test-results.md under `## Loop-Back Log`:
 the count of `### Loop-back N` entries IS the bound (max 3 per intent). This
 artifact ledger is chosen over parsing the jump's audit rows because it
@@ -63,7 +75,12 @@ impact-estimated fix identified):
    (or the autonomy grant) already chose the repair. After a `reopen`, re-run
    `next`; then continue the forwarding loop from the step that comes back.
    Never compose the `reopen` or `execute` call by hand: the engine's print
-   is the validated form.
+   is the validated form. Under `Unit Ownership: team`, `next --stage
+   code-generation --unit <unit>` on main names no `reopen`: for a landed unit
+   it prints the `aidlc unit claim <unit> --reopen` its owner runs (see
+   "Team-owned units" above). Give the person that command with the diagnosis
+   as the reason, stop the loop-back here, and wait: Build and Test runs again
+   on its own once the unit lands again.
 3. On the code-generation re-entry, follow "Re-entry settlement and review"
    below. Before any fix generation, the engine asks for Plan Approval of the
    repaired plan as required above; this is a human stop even though Construction
