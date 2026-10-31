@@ -310,7 +310,14 @@ gate, and fork operation must name the stamped Unit and current attempt
 generation. It lands only `construction/<unit>/` and its audit shard: a
 change a shared record needs (an Inception artifact such as
 `contract-summary.md`, or a stage-level file) is not planned or made there but
-raised for main, where the person makes it. A terminal `notice` means main is acting as the fan-out dispatcher:
+raised for main, where the person makes it. A bug found in another Unit's
+landed work is not fixed there either: say what is wrong (the file, the
+behaviour) and suggest the person reopen that Unit in its owner's checkout with
+`aidlc unit claim <unit> --reopen --user-input '<why>'`. Carry on with the work
+that does not need the fix; if this Unit is blocked on it, ask the person to say
+when the fix is on main, and wait. Once they say so, update the workspace and
+every repository this Unit uses from origin/main, and read the reopened Unit's
+new code summary and contracts before going on. A terminal `notice` means main is acting as the fan-out dispatcher:
 print it verbatim and stop. A participant clone runs `aidlc-unit.ts participate`
 once to opt into the guided picker; the unmarked facilitator main remains the
 notice surface. Release runs only from unscoped main via
