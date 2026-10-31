@@ -20,6 +20,7 @@ import {
   reviewRecordRelativePath,
   serializeReviewRecord,
   type ReviewRecord,
+  unitLifecycleRunFloorForProject,
 } from "../../dist/claude/.claude/tools/aidlc-lib.ts";
 import {
   approvalFingerprint,
@@ -350,9 +351,10 @@ export function auditBlock(
   stage: string,
   extra = "",
   runFloor = "unstarted#0",
+  timestamp = "2026-08-20T01:00:00Z",
 ): string {
   return `## ${event}
-**Timestamp**: 2026-08-20T01:00:00Z
+**Timestamp**: ${timestamp}
 **Event**: ${event}
 **Stage**: ${stage}
 **Unit**: ${unit}
@@ -551,6 +553,8 @@ export function prepareCandidate(
     claimSkipStages?: string[];
     /** Leave the work committed in the checkout and do not publish it. */
     publish?: boolean;
+    /** More arguments for the claim, such as `--reopen --user-input <why>`. */
+    claimArgs?: string[];
   } = {},
 ): {
   checkout: string;
@@ -566,6 +570,7 @@ export function prepareCandidate(
       "claim", unit, "--team", label,
       ...(options.unitEnd ? ["--rhythm", "unit-end"] : options.perStage ? ["--rhythm", "per-stage"] : []),
       ...(options.claimSkipStages?.length ? ["--skip-stages", options.claimSkipStages.join(",")] : []),
+      ...(options.claimArgs ?? []),
     ],
     checkout,
   );
@@ -643,13 +648,20 @@ export function prepareCandidate(
     "## Steps\n\n- [ ] Implement the Unit.\n";
   const instructions =
     "# Unit Test Instructions\n\n## Command\n\n`bun test`\n";
+  // A Unit claimed again (--reopen) starts each stage it works as a change,
+  // so its receipts carry the floor that change set, as the engine stamps it.
+  const reopened = options.claimArgs?.includes("--reopen") === true;
+  const floorOf = (stage: string): string =>
+    options.runFloor ?? (reopened ? unitLifecycleRunFloorForProject(checkout, stage, true, unit) : "unstarted#0");
+  // ...and its receipts come after the change rows the claim wrote.
+  const at = reopened ? new Date().toISOString().replace(/\.\d+Z$/, "Z") : undefined;
   const authority = {
     targetId: `unit:${unit}`,
     intentId: intentUuid,
     directiveEpoch: `sha256:${createHash("sha256")
       .update(`directive:${unit}:${generation}`)
       .digest("hex")}`,
-    runFloor: options.runFloor ?? "unstarted#0",
+    runFloor: floorOf("code-generation"),
     sourceFloor: `sha256:${createHash("sha256")
       .update(`source:${unit}:${generation}`)
       .digest("hex")}`,
@@ -680,12 +692,12 @@ export function prepareCandidate(
     writeFileSync(join(srcDir, "shared.ts"), options.sharedText);
   }
 
-  const floor = options.runFloor ?? "unstarted#0";
   let audit = "";
   for (const stage of stages) {
+    const floor = floorOf(stage);
     if (skipStages.has(stage)) {
       if (!claimSkipped.has(stage)) {
-        audit += auditBlock("UNIT_SKIPPED", unit, generation, stage, "**Reason**: the person asked to skip it\n", floor);
+        audit += auditBlock("UNIT_SKIPPED", unit, generation, stage, "**Reason**: the person asked to skip it\n", floor, at);
       }
       continue;
     }
@@ -707,6 +719,7 @@ export function prepareCandidate(
       stage,
       lifecycleExtra,
       floor,
+      at,
     );
     if (stage === "code-generation") {
       const promptSha256 = createHash("sha256")
@@ -733,6 +746,7 @@ export function prepareCandidate(
           `**Prompt SHA-256**: ${promptSha256}\n` +
           `**Session**: ${label}-session\n`,
         floor,
+        at,
       );
     }
     if (stageNode?.reviewer) {
@@ -757,6 +771,7 @@ export function prepareCandidate(
         stage,
         review.request,
         floor,
+        at,
       );
       audit += auditBlock(
         "REVIEW_COMPLETED",
@@ -765,6 +780,7 @@ export function prepareCandidate(
         stage,
         review.completion,
         floor,
+        at,
       );
     }
     if (options.unitEnd || options.ungated?.includes(stage)) continue;
@@ -775,6 +791,7 @@ export function prepareCandidate(
       stage,
       `**Gate Scope**: per-stage\n**Gate Stages**: ${stage}\n**User Input**: Approve\n`,
       floor,
+      at,
     );
   }
   const lastStage = stages[stages.length - 1];
@@ -786,7 +803,8 @@ export function prepareCandidate(
       lastStage,
       // As the engine writes it: the stages the Unit ran, not those skipped for it.
       `**Gate Scope**: unit-end\n**Gate Stages**: ${stages.filter((stage) => stage === lastStage || !skipStages.has(stage)).join(", ")}\n**User Input**: Approve\n`,
-      floor,
+      floorOf(lastStage),
+      at,
     );
   }
   const auditShard = auditShardName(checkout);
