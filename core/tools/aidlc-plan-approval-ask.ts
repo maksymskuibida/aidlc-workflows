@@ -18,6 +18,7 @@
 // (generation start, the worker brief, the swarm, team merge, worktree
 // delegation) reads this one unchanged. What changed is who writes them.
 
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -45,6 +46,7 @@ import {
   PLAN_APPROVAL_ASK_TYPE,
   planApprovalRuntimeFile,
   readActiveDirectiveMarker,
+  readApplicableTeamUnitScopeStamp,
   readAuditShardEvents,
   readBaselineSourceSnapshot,
   readPlanApprovalReceipt,
@@ -868,13 +870,32 @@ function rejectionRevision(projectDir: string, unit: string | null, intentId: st
   // against each earlier approval at that approval's own attempt.
   const approvedBefore = stalePlanApprovalReceiptsForTarget(projectDir, intentId, targetId, runFloor).some((receipt) => receipt.fingerprint ===
     approvalFingerprint(plan, instructions, read.contract.contract_sha256, receipt));
-  if (!approvedBefore) return null;
+  if (!approvedBefore && !landedPlanUnchanged(projectDir, unit, plan, instructions)) return null;
   const feedback = rejection
     ? (auditBlockField(rejection.block, "Feedback") ?? auditBlockField(rejection.block, "Reason"))?.trim()
     : undefined;
   const said = [feedback, rejection ? wordsSinceRejection(projectDir, rejection) : null]
     .filter((part): part is string => !!part).join("\n");
   return said ? { feedback: said } : {};
+}
+
+// A landed Unit claimed again (--reopen) works in a checkout of its own, where
+// the landed attempt's approval left no receipt. Its plan, still exactly as it
+// landed (as the claim's base holds it), is the approved plan the person sent
+// back with their reason.
+function landedPlanUnchanged(projectDir: string, unit: string | null, plan: string, instructions: string): boolean {
+  const stamp = unit === null ? null : readApplicableTeamUnitScopeStamp(projectDir);
+  if (!stamp || stamp.unit !== unit) return false;
+  const dir = codeGenerationRecordDir(projectDir, unit);
+  const atBase = (name: string): string | null => {
+    const shown = spawnSync(
+      "git",
+      ["show", `${stamp.claimed_from_oid}:${toPosix(relative(projectDir, join(dir, name)))}`, "--"],
+      { cwd: projectDir, encoding: "utf-8" },
+    );
+    return shown.status === 0 ? shown.stdout : null;
+  };
+  return atBase(PLAN_FILE) === plan && atBase(INSTRUCTIONS_FILE) === instructions;
 }
 
 // What the person said after the rejection, in the chat that asked for it. A
