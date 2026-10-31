@@ -255,7 +255,10 @@ quality target is never an acceptable fix.
    impact-estimated fix plan, then reopen code-generation for the unit(s) the
    fix names (every unit only when the cause spans them all) and replay
    forward through its settlement-aware route. Do NOT present this stage's
-   approval gate on the failed run.
+   approval gate on the failed run. Under `Unit Ownership: team` a landed unit
+   is reopened by its owner claiming it again
+   (`aidlc unit claim <unit> --reopen --user-input '<reason>'`), and this stage
+   waits until it lands again.
 4. **Halt-and-ask** — if the mode is gated (or unset), the 3-loop-back bound
    is exhausted, or no identifiable fix exists: log the failure in
    test-results.md and present the impact-estimated halt-and-ask question

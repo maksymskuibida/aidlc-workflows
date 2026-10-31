@@ -307,7 +307,14 @@ uses the `claim/<intent-id8>/<unit>` ref as an atomic registry and writes a
 gitignored checkout-local scope stamp. A stamped checkout executes only that
 Unit's active per-unit Construction stages and gates; every lifecycle, review,
 gate, and fork operation must name the stamped Unit and current attempt
-generation. A terminal `notice` means main is acting as the fan-out dispatcher:
+generation. A bug found in another Unit's
+landed work is not fixed there either: say what is wrong (the file, the
+behaviour) and suggest the person reopen that Unit in its owner's checkout with
+`aidlc unit claim <unit> --reopen --user-input '<why>'`. Carry on with the work
+that does not need the fix; if this Unit is blocked on it, ask the person to say
+when the fix is on main, and wait. Once they say so, update the workspace and
+every repository this Unit uses from origin/main, and read the reopened Unit's
+new code summary and contracts before going on. A terminal `notice` means main is acting as the fan-out dispatcher:
 print it verbatim and stop. A participant clone runs `aidlc-unit.ts participate`
 once to opt into the guided picker; the unmarked facilitator main remains the
 notice surface. Release runs only from unscoped main via
