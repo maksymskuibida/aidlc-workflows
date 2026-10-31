@@ -260,7 +260,7 @@ function handleReopen(args: string[]): void {
   const targetSlug = flags.target;
   const units = (flags.units ?? "").split(",").map((unit) => unit.trim()).filter(Boolean);
   if (!targetSlug || units.length === 0) {
-    error("Usage: reopen --target <slug> [--stages <slug[,slug...]>] --units <unit[,unit...]> [--via redo|change] [--scope <scope>]");
+    error("Usage: reopen --target <slug> [--stages <slug[,slug...]>] --units <unit[,unit...]> [--via redo|change [--feedback <words>]] [--scope <scope>]");
   }
   // `--via redo`: a redo of the step on re-entry, not a jump (the person's
   // Redo, or the redo the engine hands the agent for a Unit's step).
@@ -268,6 +268,9 @@ function handleReopen(args: string[]): void {
   if (flags.via !== undefined && flags.via !== "redo" && flags.via !== "change") {
     error(`Unknown --via: ${flags.via} (only "redo" or "change")`);
   }
+  // A change asked for outside a gate (a landed Unit claimed again, with the
+  // person's reason) brings its words along; at a gate they are read from it.
+  if (flags.feedback !== undefined && flags.via !== "change") error("--feedback goes only with --via change");
   const targetStage = findStageBySlug(targetSlug);
   if (!targetStage || !isPerUnitStage(targetStage)) error(`Not a per-unit stage: ${targetSlug}`);
   // The target and the later per-unit steps it reopens with it.
@@ -284,8 +287,11 @@ function handleReopen(args: string[]): void {
   // A change is kept in the person's own words, from the gate they answered,
   // with the messages they came in, as a gate's Request Changes row names them.
   const gateStage = getField(content, "Current Stage")?.trim() ?? targetSlug;
+  // A change asked for outside a gate (a landed Unit claimed again) carries the
+  // person's reason as --feedback; at a gate their reply is read from it.
+  const feedback = flags.feedback?.trim();
   const change = flags.via === "change"
-    ? personsGateReply(pd, resolveInvokingSessionId(pd), gateStage)
+    ? feedback ? { words: feedback, messageId: null, replies: [], elsewhere: [] } : personsGateReply(pd, resolveInvokingSessionId(pd), gateStage)
     : null;
   // From a later stage of the same phase (Build and Test, say) the work moves
   // back to the target as a backward jump moves it, but with no STAGE_JUMPED or

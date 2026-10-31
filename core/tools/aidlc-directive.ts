@@ -342,6 +342,9 @@ export interface RunStageDirective {
   // broughtFilesNote() (aidlc-brought-files.ts): on a Code Generation step, the
   // files the project held when the work started, to leave as they are.
   brought_files_note?: string;
+  // On a team Unit's step: a reopened attempt's reason and its earlier
+  // documents, the Units landed before it plans, and other Units reopened.
+  attempt_note?: string;
   // briefNote(): the lines every agent brief carries on a dispatched topology.
   brief_note?: string;
   // ceremonyNote(): the summary confirmation, confirm when on, skip when off.
@@ -1039,6 +1042,7 @@ const RUN_STAGE_FIELDS = [
   "plan_note",
   "other_work_note",
   "brought_files_note",
+  "attempt_note",
   "brief_note",
   "ceremony_note",
   "unit_gate",
@@ -1857,7 +1861,7 @@ export function withAgentNotes<T extends object>(
     }
     const dispatched = d.mode === "subagent" || d.mode === "pipeline" || d.mode === "mob" || "wave" in d;
     if (dispatched && isPlainObject(d.ceremony)) {
-      const carried = [d.other_work_note, d.brought_files_note].filter((note): note is string => typeof note === "string");
+      const carried = [d.other_work_note, d.brought_files_note, d.attempt_note].filter((note): note is string => typeof note === "string");
       notes.brief_note = briefNote(d.ceremony, modules, carried);
     }
   }
@@ -1967,6 +1971,7 @@ export function validateDirective(obj: unknown): ValidationResult {
   checkAgentNote(o, "plan_note", "plan_approval" in o, kind, errors);
   checkAgentNote(o, "other_work_note", "stage_file" in o, kind, errors);
   checkAgentNote(o, "brought_files_note", "stage_file" in o, kind, errors);
+  checkAgentNote(o, "attempt_note", "stage_file" in o, kind, errors);
 
   // Rule 4-6: per-kind required-field presence + type checks, with specific,
   // kind-aware messages.

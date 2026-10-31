@@ -492,6 +492,7 @@ import {
   usesStageLevelPerUnitArtifacts,
   unitLifecycleSnapshot,
   unitMergedReceipts,
+  eventMatchesClaimAttempt,
   unitMergeTransactions,
   unitMergeTransactionsForIdentity,
   unitMajorConstructionStageSlugs,
@@ -580,6 +581,7 @@ import { broughtFileNames, broughtFilesNote, unheardBroughtFilesLine } from "./a
 import { resolveSwarmCheckpoint } from "./aidlc-swarm-checkpoints.ts";
 import {
   cachedUnitClaimOverview,
+  claimReopenAt,
   localUnitClaimOverviewForIntent,
   type UnitClaimOverview,
   type UnitClaimView,
@@ -1809,6 +1811,21 @@ function prepareEmission(directive: Directive): PreparedEmission {
       ? stageOfPlan("code-generation", getField(state, "Scope")?.trim() ?? "", state, { projectDir })
       : "";
     directive.narration = `Writing the code plan for Code Generation${unit}${count} first; the developer builds from it.`;
+  }
+  // A team Unit's step in its own checkout: a reopened attempt's reason and
+  // earlier documents, what landed before it plans, other Units reopened.
+  if (directive.kind === "run-stage" && typeof directive.unit === "string" && bodyRuns(directive as unknown as Record<string, unknown>)) {
+    const projectDir = emissionProjectDir(directive);
+    if (projectDir && readApplicableTeamUnitScopeStamp(projectDir)?.unit === directive.unit) {
+      const attempt = teamUnitAttemptNote(
+        projectDir,
+        engineRelativeRecordDir(projectDir),
+        directive.unit,
+        directive.stage,
+        readAuditShardEvents(projectDir),
+      );
+      if (attempt !== null) directive.attempt_note = attempt;
+    }
   }
   // A step that builds in the workspace names the files another open piece of
   // work in this folder claims, so this build leaves them as they are. Before
@@ -12892,7 +12909,10 @@ function routeNext(agentArgs: string[], projectDir: string | undefined): void {
         const dag = resolveBoltBatches(pd);
         const unitWorkLeft = dag.state === "ok" &&
           dag.batches.flat().some((unit) => !model.mergedUnits.has(unit));
-        if (board.awaitingMerge.length > 0 || (unitWorkLeft && cachedClaimFanoutActive(pd))) {
+        // A landed Unit claimed again (--reopen) keeps main waiting until its
+        // new attempt lands, though every Unit reads merged meanwhile.
+        const reopenedOpen = overview.claimed.some((row) => model.mergedUnits.has(row.unit));
+        if (board.awaitingMerge.length > 0 || (unitWorkLeft && cachedClaimFanoutActive(pd)) || reopenedOpen) {
           emit(noticeDirective(
             renderTeamConstructionBoard(board, "dispatcher"),
           ));
@@ -15537,21 +15557,27 @@ export function deriveTeamUnitProgressModel(
     mergeTracking,
     mainOwnedUnits,
     mergedUnitOverrides,
-    unitGateRhythmsFromAudit(orderedAuditRows),
+    unitGateRhythmsFromAudit(projectDir, orderedAuditRows),
   );
 }
 
 // The rhythm a team Unit was claimed with, as its gate rows record it: a Unit
 // claimed with unit-end approves once, on a row scoped unit-end, and one
-// claimed per-stage on rows scoped per-stage. A Unit with no such row walks
+// claimed per-stage on rows scoped per-stage. Only the rows of the attempt
+// this checkout reads count: a Unit claimed again (`claim --reopen`) may walk
+// another rhythm than the attempt that landed. A Unit with no such row walks
 // this checkout's own rhythm.
-function unitGateRhythmsFromAudit(rows: readonly AuditShardEvent[]): Map<string, UnitGateRhythm> {
+function unitGateRhythmsFromAudit(
+  projectDir: string,
+  rows: readonly AuditShardEvent[],
+): Map<string, UnitGateRhythm> {
   const rhythms = new Map<string, UnitGateRhythm>();
   for (const row of rows) {
     if (row.event !== "GATE_APPROVED" && row.event !== "STAGE_AWAITING_APPROVAL") continue;
     const unit = auditBlockField(row.block, "Unit");
     const scope = auditBlockField(row.block, "Gate Scope");
-    if (unit && (scope === "unit-end" || scope === "per-stage")) rhythms.set(unit, scope);
+    if (!unit || !eventMatchesClaimAttempt(projectDir, row.block, unit)) continue;
+    if (scope === "unit-end" || scope === "per-stage") rhythms.set(unit, scope);
   }
   return rhythms;
 }
@@ -15581,6 +15607,78 @@ function refreshTeamUnitProgress(
     );
   }
   return readStateFile(projectDir);
+}
+
+// What a claimed Unit's agent must know beyond its stage: its attempt's
+// reason when the Unit landed and was claimed again (worked as a Request
+// Changes at its gate, from the landed attempt's documents); before it plans
+// its code, the Units that landed before it (since its last landing, for a
+// reopened Unit), so no Unit misses what the others changed; and another Unit
+// that is reopened meanwhile, with how to wait for its fix. null when none
+// applies. Read from this checkout's claim refs and audit, nothing fetched.
+function teamUnitAttemptNote(
+  projectDir: string,
+  recordPrefix: string | null,
+  unit: string,
+  stage: string,
+  auditRows: readonly AuditShardEvent[],
+): string | null {
+  let claims: UnitClaimOverview["claims"];
+  try {
+    claims = cachedUnitClaimOverview(projectDir, { writeCache: false }).claims;
+  } catch {
+    return null;
+  }
+  const record = recordPrefix ?? "";
+  const landedAt = new Map<string, Map<number, string>>();
+  for (const row of auditRows) {
+    if (row.event !== "UNIT_MERGED") continue;
+    const name = auditBlockField(row.block, "Unit");
+    const generation = Number(auditBlockField(row.block, "Attempt Generation"));
+    if (!name || !Number.isInteger(generation)) continue;
+    if (!landedAt.has(name)) landedAt.set(name, new Map());
+    landedAt.get(name)!.set(generation, row.timestamp);
+  }
+  const parts: string[] = [];
+  const stamp = readApplicableTeamUnitScopeStamp(projectDir);
+  const reopen = stamp?.unit === unit ? claimReopenAt(projectDir, stamp.claim_oid) : null;
+  if (reopen) {
+    parts.push(
+      `This is attempt ${stamp!.generation} of unit ${unit}. Attempt ${reopen.landed_generation} landed, and the person ` +
+        `claimed it again because: "${reopen.reason}". Work it as a Request Changes at the Unit's gate, with that ` +
+        `reason as the change asked for: start from attempt ${reopen.landed_generation}'s documents under ` +
+        `${record}/construction/${unit}/${stage}/, keep what still holds, change what the reason needs, and say what ` +
+        "changed and why.",
+    );
+  }
+  if (stage === "code-generation") {
+    const since = reopen ? landedAt.get(unit)?.get(reopen.landed_generation) ?? "" : "";
+    const landed = [...landedAt.entries()]
+      .filter(([name, attempts]) => name !== unit && [...attempts.values()].some((at) => at > since))
+      .map(([name]) => name)
+      .sort();
+    if (landed.length > 0) {
+      const contracts = `${record}/inception/contract-design/contract-summary.md`;
+      parts.push(
+        `Before you plan, read what ${landed.length === 1 ? "this Unit" : "these Units"} landed` +
+          `${reopen ? ` since attempt ${reopen.landed_generation}` : ""}: ` +
+          landed.map((name) => `${name} (${record}/construction/${name}/code-generation/code-summary.md)`).join(", ") +
+          (existsSync(join(projectDir, contracts)) ? `, and the shared contracts in ${contracts}` : "") +
+          ". The plan names what it read and what it changes because of it.",
+      );
+    }
+  }
+  for (const [name, claim] of [...claims.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (name === unit || claim.status !== "claimed" || !claim.payload.reopen) continue;
+    if (landedAt.get(name)?.has(claim.generation)) continue;
+    parts.push(
+      `Unit ${name} is reopened (attempt ${claim.generation}): "${claim.payload.reopen.reason}". Tell the person once. ` +
+        "Carry on with the work you can do without its fix. If you are blocked on it, ask the person to tell you when " +
+        "the fix is on main, and wait for that; once they say so, update the workspace and every repository this Unit " +
+        `uses from origin/main, then read ${name}'s new code summary and contracts before going on.`,
+    );
+  }
+  return parts.length > 0 ? parts.join(" ") : null;
 }
 
 function emitTeamUnitMajorRunStage(
@@ -17977,6 +18075,43 @@ function unitChoiceRefusal(stateContent: string, targetSlug: string): string {
     `run \`next --stage ${targetSlug} --every-unit\`.`;
 }
 
+// Under team ownership one Unit's per-Unit step is not reopened from a checkout
+// that does not hold it. A Unit worked in its own checkout is reopened there; a
+// Unit that landed goes back to work by being claimed again as a new attempt,
+// and nothing on main changes until that attempt lands; a Unit nobody has built
+// has nothing to reopen. null outside team ownership or for a stage done once
+// for all Units, which keeps the every-unit answer.
+function teamUnitReopenByClaim(
+  projectDir: string,
+  stateContent: string,
+  targetSlug: string,
+  unit: string,
+): string | null {
+  const node = nodeForSlug(targetSlug);
+  if (!isTeamUnitOwnership(stateContent) || !node || !isPerUnit(node)) return null;
+  const name = node.name || targetSlug;
+  let overview: UnitClaimOverview;
+  try {
+    overview = cachedUnitClaimOverview(projectDir, { writeCache: false });
+  } catch {
+    return null;
+  }
+  if (overview.claimed.some((claim) => claim.unit === unit)) {
+    return `Run nothing. Tell the person in one line: "Unit ${unit} is being worked in its own checkout; ` +
+      `${name} is reopened for it there, with /aidlc --stage ${targetSlug}. Nothing changed here."`;
+  }
+  if (overview.claimable.includes(unit) || overview.waiting.some((row) => row.unit === unit)) {
+    return `Run nothing. Tell the person in one line: "Unit ${unit} has not been built yet, so there is nothing ` +
+      `to reopen. Nothing changed."`;
+  }
+  return `Run nothing. Tell the person in one line: "Unit ${unit} has landed, so it goes back to work by being ` +
+    "claimed again as a new attempt. Main does not change until that attempt lands, the other Units keep their work, " +
+    "and Build and Test waits for it.\" Then give them the command its owner runs in a checkout of their own " +
+    `(a fresh worktree off the latest main), with the person's reason in their own words: ` +
+    `\`aidlc unit claim ${unit} --reopen --user-input '<why>'\`. A plain claim runs every stage again; ` +
+    "`--skip-stages` leaves stages out for this attempt.";
+}
+
 // Whether this `next` makes the jump itself: not on a read-only probe, at most
 // once per command, and not where Code Generation is the step on record, where
 // the plan-approval guard judges the `jump execute` the print names.
@@ -18049,7 +18184,10 @@ function emitJumpDirective(
     // redoes the step for every unit. `--every-unit` asks for exactly what the
     // jump below does here, so it goes through and says so in one line.
     if (flags.jumpUnit !== undefined) {
-      emit(turnEndingPrint(unitChoiceRefusal(unitMajorState, targetSlug)));
+      emit(turnEndingPrint(
+        teamUnitReopenByClaim(projectDir, unitMajorState, targetSlug, flags.jumpUnit) ??
+          unitChoiceRefusal(unitMajorState, targetSlug),
+      ));
       return;
     }
     const everyUnitSaid = flags.everyUnit && direction !== "forward"

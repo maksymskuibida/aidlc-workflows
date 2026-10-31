@@ -44,7 +44,7 @@ diagnostic and lifecycle routes.
 | `/aidlc knowledge <verb>` | Index and read your own documents (`onboard`, `sync`, `list`, `show`, `associate`, `dissociate`, `rebind`, `summarize`) |
 | `/aidlc --status` | Display a read-only status summary |
 | `/aidlc --config [section]` | Configure project policy conversationally, then land exact deterministic config flags |
-| `/aidlc --claim <unit> [--team <label>] [--rhythm <per-stage\|unit-end>]` | Atomically claim an open team-owned Unit and bind this checkout to that attempt |
+| `/aidlc --claim <unit> [--team <label>] [--rhythm <per-stage\|unit-end>] [--reopen --user-input <why>]` | Atomically claim an open team-owned Unit (or, with `--reopen`, a landed one again) and bind this checkout to that attempt |
 | `/aidlc --release <unit>` | Release a live Unit claim from unscoped main by publishing a tombstone |
 | `/aidlc unit adopt <unit>` | Adopt the checked-out live claim branch in a fresh clone |
 | `/aidlc unit participate` | Mark this clone for the guided Unit-claim picker |
@@ -638,6 +638,7 @@ concurrent claimant succeeds.
 /aidlc --claim user-profile-api --team "Alice"
 /aidlc --claim user-profile-api --rhythm unit-end
 /aidlc unit claim user-profile-api --team "Alice"
+/aidlc unit claim user-profile-api --reopen --user-input "the refund total ignores tax"
 ```
 
 `--team` supplies the human-readable holder label. `--rhythm` optionally pins
@@ -647,6 +648,23 @@ walking skeleton are complete, and a checkout with a live claim routes only its
 stamped Unit. While main is back at Units Generation changing the Unit plan, a
 claim still goes ahead, and its result says once that if the approved plan
 changes that Unit's own entry, pin asks for a rebase onto main.
+
+`--reopen` sends a Unit that already landed back to work, for the reason the
+person gives with `--user-input` (Build and Test failed on it, a later check did,
+or another Unit found a bug in it). It claims the Unit again as the attempt after
+the one that landed, also when the Unit's claim ref is gone, and keeps the reason
+in the claim. A plain claim runs every per-Unit stage again; `--skip-stages`
+leaves stages out for this attempt only, so a stage skipped before runs unless it
+is named again. Each stage the attempt works is reopened as the person's change
+(the plan step revises the landed plan from the reason before asking about it),
+and the attempt's steps tell the agent the reason, the landed attempt's
+documents and the Units landed since. Nothing on main changes until the attempt
+lands: the Unit stays complete there and the Units that depend on it stay
+claimable, while main's Build and Test and every stage after it wait for any
+claim whose attempt has not landed. When it lands, its Unit Progress row is the
+new attempt's, and every stage main had done from Build and Test on runs again.
+Without `--reopen` a landed Unit's claim is refused and names it; `--reopen` on a
+Unit that has not landed is refused.
 
 ### `/aidlc unit adopt <unit>` — Adopt a teammate's live claim
 
