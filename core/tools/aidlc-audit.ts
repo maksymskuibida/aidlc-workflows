@@ -937,6 +937,19 @@ function renderAuditBlock(
   return `${block}\n---\n`;
 }
 
+// One audit block as the append writes it, for a caller that commits it
+// somewhere other than this checkout's shard file (a receipt committed on a
+// branch of its own).
+export function auditEntryBlock(
+  eventType: string,
+  fields: Record<string, string>,
+  projectDir: string,
+): string {
+  const entry = { eventType, fields };
+  validateAuditEntry(entry);
+  return renderAuditBlock(entry, isoTimestamp(), projectDir);
+}
+
 // One best-effort metrics tap shared by every structured audit append path.
 // Lazy loading keeps metrics fully opt-in and lets audit-only fixtures omit the
 // module. Each call catches independently so one lost metric cannot block an

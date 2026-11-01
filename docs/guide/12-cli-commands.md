@@ -53,7 +53,7 @@ diagnostic and lifecycle routes.
 | `/aidlc unit gate <unit> ...` | Record the merge decision against the pinned OID and generation |
 | `/aidlc unit land <unit> ...` | Run the resumable git → state → audit landing transaction |
 | `/aidlc unit pr <unit> [--repo <name>] [--draft] [--title <text>] [--body-file <path>]` | Open the Unit's code or workspace pull request through `gh` (strategy `pr`) |
-| `/aidlc unit finish <unit> [--accept-merged-drift --user-input <text> [--branch <name>]]` | Verify the merged pull request against the landed head and end the checkout's scope (strategy `pr`) |
+| `/aidlc unit finish <unit> [--pr <owner>/<repo>#<n>] [--accept-merged-drift --user-input <text>] [--branch <name>]` | Verify the merged pull request against the landed head and end the checkout's scope (strategy `pr`), or record the landing of a Unit a pull request merged without `land` |
 | `/aidlc unit merge-status <unit>` | Read the local pinned-merge transaction journal |
 | `/aidlc unit status` | Read the current claimable, claimed, and dependency-blocked Unit sets |
 | `/aidlc --doctor [--check-updates]` | Run a health check; the explicit flag refreshes update metadata |
@@ -670,7 +670,9 @@ claimable, while main's Build and Test and every stage after it wait for any
 claim whose attempt has not landed. When it lands, its Unit Progress row is the
 new attempt's, and every stage main had done from Build and Test on runs again.
 Without `--reopen` a landed Unit's claim is refused and names it; `--reopen` on a
-Unit that has not landed is refused.
+Unit that has not landed is refused. A Unit that a pull request merged without
+`aidlc unit land` has no landing on record yet: the claim, `next` and both
+status views name `unit finish <unit> --pr` until its receipt is on main.
 
 ### `/aidlc unit adopt <unit>` — Adopt a teammate's live claim
 
@@ -865,6 +867,41 @@ request for it. A claim from a checkout still scoped to a
 merged Unit is refused until that Unit is finished. A checkout whose Unit was
 landed from another checkout, or whose claim was released or superseded, has
 nothing to verify: finish ends its scope the same way and says so.
+
+A Unit that a pull request merged without `land` (one built by hand from the
+Unit's branch) is complete on the integration branch with no `UNIT_MERGED`
+receipt, and its claim is still open. `unit status` lists it under
+`landingNotRecorded`, `engine status` marks its row "landing not recorded",
+and `next` and `claim --reopen` name this step, run in any checkout with no
+merge journal for the Unit:
+
+```bash
+/aidlc unit finish user-profile-api --pr acme/workspace#42
+```
+
+It requires the pull request merged with its merge commit on the integration
+branch, and its head to contain the candidate the Unit's claim published, so
+the pull request is that attempt's. A head without it is refused unless a
+person accepts it with `--accept-merged-drift --user-input <text>`, which adds
+`UNIT_MERGE_DRIFT_ACCEPTED` with their words. It then writes the `UNIT_MERGED`
+receipt for the claim's attempt, naming the pull request and that it was
+recorded after the merge, and commits it on a branch of its own cut from the
+integration tip (`<unit>-landing-record`, or `--branch <name>`), leaving the
+checkout's branch and files as they were. It pushes nothing: the output says
+how the branch reaches the integration branch, as the project takes changes.
+Once the receipt is there, the Unit reads as landed and `claim --reopen` claims
+the next attempt; the claim ref stays until then. A Unit whose landing is
+already recorded, on the integration branch or on that branch, is refused.
+
+Such a pull request also brings the Unit's branch's whole state file to the
+integration branch: the Unit's own Current Stage, Status, stage markers and
+Last Updated in place of main's, which `land` never changes. The same commit
+puts main's part of the state file back as the merge's first parent had it,
+keeping what the integration branch changed there since and its Unit Progress
+table as it is now; a change since that clashes line by line with the one to
+undo is refused with the two diffs to compare. Run once the receipt is already
+on the integration branch, with the same pull request, `finish --pr` commits
+that repair alone, on `<unit>-state-repair` (or `--branch <name>`).
 
 ### `/aidlc unit status` — Inspect Unit claims
 
