@@ -15,7 +15,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { appendAuditEntry } from "./aidlc-audit.ts";
+import { appendAuditEntry, auditEntryBlock } from "./aidlc-audit.ts";
 import {
   activeIntentUuid,
   activeSpace,
@@ -206,6 +206,8 @@ export interface UnitClaimOverview {
   claimable: string[];
   claimed: Array<{ unit: string; owner: string; generation: number }>;
   waiting: Array<{ unit: string; blockedBy: string[] }>;
+  /** Complete on main with the claim still open and no landing receipt: merged without `unit land`. */
+  landingNotRecorded: Array<{ unit: string; owner: string; generation: number }>;
   claims: Map<string, UnitClaimView>;
   warning?: string;
 }
@@ -563,18 +565,27 @@ function createClaimCommit(
     CLAIM_FILE,
     `${JSON.stringify(payload, null, 2)}\n`,
   );
+  return commitTree(
+    projectDir,
+    tree,
+    [parentOid, ...(additionalParentOid ? [additionalParentOid] : [])],
+    `aidlc unit ${payload.status}: ${payload.unit} generation ${payload.generation}`,
+  );
+}
+
+// A commit of `tree` made without touching the worktree or the index, as the
+// person's own commit.
+function commitTree(projectDir: string, tree: string, parents: string[], message: string): string {
   // commit-tree does not read commit.gpgsign on its own; porcelain commits do.
   const signed =
     git(projectDir, ["config", "--type=bool", "commit.gpgsign"]).stdout.trim() === "true";
   const commitArgs = [
     "commit-tree",
     tree,
-    "-p",
-    parentOid,
-    ...(additionalParentOid ? ["-p", additionalParentOid] : []),
+    ...parents.flatMap((parent) => ["-p", parent]),
     ...(signed ? ["-S"] : []),
     "-m",
-    `aidlc unit ${payload.status}: ${payload.unit} generation ${payload.generation}`,
+    message,
   ];
   const commit = git(projectDir, commitArgs);
   if (!commit.ok) {
@@ -766,6 +777,27 @@ function reopenedClaim(claim: UnitClaimView | undefined, landed: number | undefi
   return landed !== undefined && openClaim(claim, landed);
 }
 
+// A Unit complete on main whose first claim is still open with no landing on
+// record: a pull request merged it without `aidlc unit land` (one built by
+// hand from the Unit's branch), so no UNIT_MERGED receipt was written and the
+// claim was never closed. `finish --pr` records that landing. A reopened
+// attempt's open claim is live work, not this.
+function landingNotRecorded(
+  completed: boolean,
+  claim: UnitClaimView | null | undefined,
+  landed: number | undefined,
+): boolean {
+  return completed && claim?.status === "claimed" && claim.payload.reopen === undefined &&
+    claim.generation > (landed ?? 0);
+}
+
+// The one step that records such a landing, as claim and finish name it.
+function recordLandingStep(unit: string, where: string): string {
+  return `Record the landing first, in a checkout of ${where}: \`aidlc unit finish ${unit} --pr <owner>/<repo>#<n>\` ` +
+    `with the pull request that merged it. It commits the landing's receipt on a branch of its own, which reaches ` +
+    `${where} the way this project takes changes; then the Unit can be claimed again with --reopen.`;
+}
+
 // The one opening rule for the claim, status, release, the picker and the
 // board. The walking skeleton is the first DAG Unit, built on main; while it is
 // on, every Unit waits until its Unit Progress row is complete, the same
@@ -806,19 +838,28 @@ function allClaims(
   return claims;
 }
 
+// `landingsRead` is false where the receipts were not read (another intent's
+// board), so no landing is called unrecorded there.
 function buildOverview(
   opening: ReturnType<typeof openingStatus>,
   claims: Map<string, UnitClaimView>,
   warning?: string,
+  landingsRead = true,
 ): UnitClaimOverview {
   const claimable: string[] = [];
   const claimed: Array<{ unit: string; owner: string; generation: number }> = [];
   const waiting: Array<{ unit: string; blockedBy: string[] }> = [];
+  const notRecorded: Array<{ unit: string; owner: string; generation: number }> = [];
   for (const unit of opening.units) {
     const claim = claims.get(unit);
     // A landed Unit stays complete on main while it is claimed again; its open
     // claim is listed with the others.
-    if (opening.completed.has(unit) && !reopenedClaim(claim, opening.landed.get(unit))) continue;
+    if (opening.completed.has(unit) && !reopenedClaim(claim, opening.landed.get(unit))) {
+      if (landingsRead && claim && landingNotRecorded(true, claim, opening.landed.get(unit))) {
+        notRecorded.push({ unit, owner: claim.owner, generation: claim.generation });
+      }
+      continue;
+    }
     if (claim?.status === "claimed") {
       claimed.push({ unit, owner: claim.owner, generation: claim.generation });
       continue;
@@ -827,7 +868,7 @@ function buildOverview(
     if (blockedBy.length > 0) waiting.push({ unit, blockedBy });
     else claimable.push(unit);
   }
-  return { claimable, claimed, waiting, claims, ...(warning ? { warning } : {}) };
+  return { claimable, claimed, waiting, landingNotRecorded: notRecorded, claims, ...(warning ? { warning } : {}) };
 }
 
 function cacheClaims(
@@ -1008,7 +1049,7 @@ export function cachedUnitClaimOverview(
   const pd = resolveProjectDir(projectDir);
   const state = readStateFile(pd);
   if (!isTeamUnitOwnership(state)) {
-    return { claimable: [], claimed: [], waiting: [], claims: new Map() };
+    return { claimable: [], claimed: [], waiting: [], landingNotRecorded: [], claims: new Map() };
   }
   const opening = localOpeningStatus(pd);
   const cache = readUnitClaimRegistryCache(pd);
@@ -1030,7 +1071,7 @@ export function localUnitClaimOverviewForIntent(
 ): UnitClaimOverview {
   const pd = resolveProjectDir(projectDir);
   if (!isTeamUnitOwnership(selector.stateContent)) {
-    return { claimable: [], claimed: [], waiting: [], claims: new Map() };
+    return { claimable: [], claimed: [], waiting: [], landingNotRecorded: [], claims: new Map() };
   }
   const opening = openingStatusFrom(
     selector.stateContent,
@@ -1045,14 +1086,14 @@ export function localUnitClaimOverviewForIntent(
     },
     true,
   );
-  return buildOverview(opening, claims);
+  return buildOverview(opening, claims, undefined, false);
 }
 
 export function unitClaimOverview(projectDir: string): UnitClaimOverview {
   const pd = resolveProjectDir(projectDir);
   const state = readStateFile(pd);
   if (!isTeamUnitOwnership(state)) {
-    return { claimable: [], claimed: [], waiting: [], claims: new Map() };
+    return { claimable: [], claimed: [], waiting: [], landingNotRecorded: [], claims: new Map() };
   }
   const identity = activeIdentity(pd);
   const integration = fetchIntegration(pd);
@@ -4379,6 +4420,16 @@ function claimUnit(args: string[], projectDir?: string): void {
   const opening = openingStatus(pd, integration.oid);
   if (!opening.units.includes(unit)) fail(`Unit "${unit}" is not in the authoritative Unit DAG.`);
   const landed = opening.landed.get(unit) ?? 0;
+  const ref = claimRef(identity.intentId8, unit);
+  const current = currentClaim(pd, integration.remote, ref);
+  if (current && landingNotRecorded(opening.completed.has(unit), current, opening.landed.get(unit))) {
+    const where = integration.remote ? `${integration.remote}/${integration.branch}` : integration.branch;
+    fail(
+      `Unit "${unit}" is complete on ${where}, but its landing is not recorded: a pull request merged it without ` +
+        `\`aidlc unit land\`, and its claim (attempt ${current.generation}, by "${current.owner}") is still open. ` +
+        `${recordLandingStep(unit, where)} Nothing was claimed.`,
+    );
+  }
   if (opening.completed.has(unit) && !reopen) {
     fail(
       `Unit "${unit}" is already complete on the integration ref. To send it back to work, claim it again ` +
@@ -4398,8 +4449,6 @@ function claimUnit(args: string[], projectDir?: string): void {
     );
     fail(named.join("; "));
   }
-  const ref = claimRef(identity.intentId8, unit);
-  const current = currentClaim(pd, integration.remote, ref);
   // The claim a landing leaves on its ref is the landed attempt, not a live one.
   if (current?.status === "claimed" && (!reopen || openClaim(current, landed))) {
     fail(`Unit "${unit}" is already claimed by "${current.owner}".`);
@@ -5109,15 +5158,16 @@ function validateDriftAcknowledgment(unit: string, userInput: string | undefined
   return answer;
 }
 
-// The drift follow-up's branch: `--branch <name>` when the caller names one (a
-// team's own branch convention), else `<unit>-merge-drift`.
-function driftBranch(
+// A follow-up's branch: `--branch <name>` when the caller names one (a team's
+// own branch convention), else the given default (`<unit>-merge-drift` for the
+// drift follow-up).
+function followUpBranch(
   projectDir: string,
-  unit: string,
+  fallback: string,
   flags: Record<string, string>,
   bareFlags: Set<string>,
 ): string {
-  if (!("branch" in flags)) return `${unit}-merge-drift`;
+  if (!("branch" in flags)) return fallback;
   const name = bareFlags.has("branch") ? "" : flags.branch.trim();
   if (!name) fail("--branch needs the follow-up branch's name.");
   if (!git(projectDir, ["check-ref-format", "--branch", name]).ok) fail(`--branch "${name}" is not a valid branch name.`);
@@ -5134,7 +5184,7 @@ function finishUnit(args: string[], projectDir?: string): void {
   if (!unit) {
     fail(
       "Usage: aidlc-unit finish <unit> [--pr <owner>/<repo>#<n>] " +
-        "[--accept-merged-drift --user-input <human acknowledgment> [--branch <name>]]",
+        "[--accept-merged-drift --user-input <human acknowledgment>] [--branch <name>]",
     );
   }
   const unitError = validateUnitName(unit);
@@ -5147,6 +5197,15 @@ function finishUnit(args: string[], projectDir?: string): void {
   }
   const integration = fetchIntegration(pd);
   const existing = readUnitMergeTransaction(pd, unit);
+  if (!existing && flags.pr !== undefined) {
+    const opening = openingStatus(pd, integration.oid);
+    if (opening.completed.has(unit)) {
+      const result = recordLandingAfterMerge(pd, unit, flags, bareFlags, integration, opening);
+      if (stamp) closeCheckoutScope(pd, git(pd, ["branch", "--show-current"]).stdout.trim(), result);
+      else console.log(JSON.stringify(result));
+      return;
+    }
+  }
   if (!existing || !["complete", "finished"].includes(existing.status)) {
     // Not landed from here. The scope still ends when the Unit is complete on
     // the integration ref (another checkout landed it) or this checkout's
@@ -5154,7 +5213,8 @@ function finishUnit(args: string[], projectDir?: string): void {
     if (!stamp) {
       fail(`This checkout is not scoped to Unit "${unit}" and did not land it; nothing to finish.`);
     }
-    const completed = openingStatus(pd, integration.oid).completed.has(unit);
+    const opening = openingStatus(pd, integration.oid);
+    const completed = opening.completed.has(unit);
     const live = currentClaim(pd, integration.remote, stamp.claim_ref);
     const superseded =
       live?.status !== "claimed" ||
@@ -5173,6 +5233,9 @@ function finishUnit(args: string[], projectDir?: string): void {
       reason: completed
         ? `Unit "${unit}" is complete on ${integration.ref}, landed from another checkout.`
         : `This checkout's claim of Unit "${unit}" was released or superseded.`,
+      ...(landingNotRecorded(completed, live, opening.landed.get(unit))
+        ? { landing_not_recorded: recordLandingStep(unit, integration.ref) }
+        : {}),
     });
     return;
   }
@@ -5224,7 +5287,7 @@ function finishUnit(args: string[], projectDir?: string): void {
     if (git(pd, ["status", "--porcelain", "--untracked-files=no"]).stdout.trim()) {
       fail(`Unit "${unit}" drift acknowledgment needs a clean tracked tree for its follow-up pull request; commit first.`);
     }
-    const branch = driftBranch(pd, unit, flags, bareFlags);
+    const branch = followUpBranch(pd, `${unit}-merge-drift`, flags, bareFlags);
     const switched = git(pd, ["switch", "-c", branch, integration.oid]);
     if (!switched.ok) fail(`Cannot create branch "${branch}" from ${integration.ref}: ${switched.stderr.trim()}`);
     appendAuditEntry(
@@ -5306,6 +5369,142 @@ function finishUnit(args: string[], projectDir?: string): void {
   });
 }
 
+// A Unit a pull request merged without `aidlc unit land` (one built by hand
+// from the Unit's branch) is complete on main with no UNIT_MERGED receipt, and
+// its claim is still open. `finish --pr` writes that receipt after the merge,
+// once the pull request is tied to the claim's attempt: it is merged, its
+// merge commit is on the integration ref, and its head contains the candidate
+// the claim published, or the person accepts the difference
+// (--accept-merged-drift, recorded with their words). The receipt is
+// committed on a branch of its own off the integration ref, which the project
+// merges the way it takes any change; this checkout's branch and files stay as
+// they are. The claim ref stays: once the receipt is on main it is the landed
+// attempt's claim, which `claim --reopen` supersedes, and until then it keeps a
+// reopen from claiming attempt 1 again.
+function recordLandingAfterMerge(
+  pd: string,
+  unit: string,
+  flags: Record<string, string>,
+  bareFlags: Set<string>,
+  integration: ReturnType<typeof fetchIntegration>,
+  opening: OpeningStatus,
+): Record<string, unknown> {
+  const ref = bareFlags.has("pr") ? "" : flags.pr.trim();
+  if (!ref) fail("--pr needs the pull request that merged the Unit: --pr <owner>/<repo>#<n>.");
+  const where = integration.remote ? `${integration.remote}/${integration.branch}` : integration.branch;
+  const claim = currentClaim(pd, integration.remote, claimRef(activeIdentity(pd).intentId8, unit));
+  const landed = opening.landed.get(unit);
+  if (claim?.status !== "claimed" || claim.generation <= (landed ?? 0)) {
+    fail(
+      landed !== undefined
+        ? `Unit "${unit}"'s landing is already recorded: attempt ${landed} has its UNIT_MERGED receipt on ${where}. Nothing was recorded.`
+        : `Unit "${unit}" has no open claim on ${where} whose landing could be recorded. Nothing was recorded.`,
+    );
+  }
+  const branch = followUpBranch(pd, `${unit}-landing-record`, flags, bareFlags);
+  const pushStep = integration.remote
+    ? `\`git push -u ${integration.remote} ${shellWord(branch)}\` and open its pull request into ${integration.branch}, ` +
+      `or, where ${integration.branch} takes direct pushes, \`git push ${integration.remote} ${shellWord(branch)}:${integration.branch}\``
+    : `\`git merge --ff-only ${shellWord(branch)}\` on ${integration.branch}`;
+  const recordedOn = git(pd, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]);
+  if (recordedOn.ok) {
+    fail(
+      `Unit "${unit}"'s landing is already recorded on branch "${branch}" (${recordedOn.stdout.trim().slice(0, 12)}); ` +
+        `get it onto ${where}: ${pushStep}. Nothing new was recorded.`,
+    );
+  }
+  const view = viewPullRequest(ref);
+  if (view.state !== "MERGED" || !view.mergeCommit) {
+    fail(`Pull request ${ref} is not merged (state ${view.state ?? "unknown"}). Nothing was recorded.`);
+  }
+  const mergeCommit = view.mergeCommit;
+  ensureCommitPresent(pd, mergeCommit, integration.remote, `Merge commit of ${ref}`);
+  if (!git(pd, ["merge-base", "--is-ancestor", mergeCommit, integration.oid]).ok) {
+    fail(`Merge commit ${mergeCommit} of ${ref} is not on ${integration.ref} at ${integration.oid}. Nothing was recorded.`);
+  }
+  // The pull request is the claim's attempt when its head contains the
+  // candidate that attempt published.
+  const candidate = claim.payload.candidate_head_oid ?? null;
+  const head = view.headRefOid;
+  if (candidate) ensureCommitPresent(pd, candidate, integration.remote, `Unit "${unit}" candidate`);
+  if (head) ensureCommitPresent(pd, head, integration.remote, `Head of ${ref}`);
+  const tied = candidate !== null && head !== null &&
+    git(pd, ["merge-base", "--is-ancestor", candidate, head]).ok;
+  const blocks: string[] = [];
+  if (!tied) {
+    if (flags["accept-merged-drift"] !== "true") {
+      fail(
+        (candidate
+          ? `Pull request ${ref}'s head ${head ?? "(unknown)"} does not contain the candidate ${candidate} that ` +
+            `Unit "${unit}"'s claim published (attempt ${claim.generation}), so it is not tied to that attempt. ` +
+            `Inspect it (git log ${candidate}..${head ?? "<head>"}, git diff ${candidate} ${head ?? "<head>"}); `
+          : `Unit "${unit}"'s claim (attempt ${claim.generation}) published no candidate, so ${ref} cannot be tied ` +
+            "to that attempt. Inspect what it merged; ") +
+          `to record the landing anyway, run aidlc unit finish ${unit} --pr ${ref} --accept-merged-drift ` +
+          `--user-input "<what you inspected and accept>". Nothing was recorded.`,
+      );
+    }
+    const userInput = validateDriftAcknowledgment(unit, flags["user-input"]);
+    let drift: string[] = [];
+    if (candidate && head) {
+      const base = gitOutput(pd, ["merge-base", candidate, head], `Cannot find the merge base of ${candidate} and ${head}`);
+      drift = [...new Set([
+        ...contentNotOnTip(pd, base, candidate, head),
+        ...contentNotOnTip(pd, base, head, candidate),
+      ])].sort();
+    }
+    blocks.push(auditEntryBlock(
+      "UNIT_MERGE_DRIFT_ACCEPTED",
+      {
+        Unit: unit,
+        "Pull request": view.url,
+        "Merge commit OID": mergeCommit,
+        "Landed head OID": candidate ?? "none published",
+        Paths: drift.join(", ") || "-",
+        "User Input": userInput,
+      },
+      pd,
+    ));
+  }
+  blocks.push(auditEntryBlock(
+    "UNIT_MERGED",
+    {
+      Unit: unit,
+      Owner: claim.owner,
+      "Pinned OID": candidate ?? head ?? mergeCommit,
+      "Merge commit OID": mergeCommit,
+      "Attempt Generation": String(claim.generation),
+      "Pull request": view.url,
+      Recorded: "after the merge, by aidlc unit finish --pr: the pull request merged the Unit without aidlc unit land",
+    },
+    pd,
+  ));
+  const recordPrefix = relativeRecordDir(pd);
+  if (!recordPrefix) fail("Cannot resolve this intent's record directory.");
+  const shardPath = `${recordPrefix}/audit/${auditShardName(pd)}`;
+  const onMain = git(pd, ["show", `${integration.oid}:${shardPath}`]);
+  const tree = writeTreeWithEntries(pd, integration.oid, [
+    { path: shardPath, content: `${onMain.ok ? onMain.stdout : ""}${blocks.join("")}` },
+  ]);
+  const commit = commitTree(pd, tree, [integration.oid], `Record Unit ${unit} landing by ${ref}`);
+  const branched = git(pd, ["branch", branch, commit]);
+  if (!branched.ok) fail(`Cannot create branch "${branch}" for the receipt: ${branched.stderr.trim()}`);
+  return {
+    recorded: true,
+    unit,
+    generation: claim.generation,
+    pull_request: view.url,
+    merge_commit: mergeCommit,
+    ...(tied ? {} : { drift_accepted: true }),
+    receipt_branch: branch,
+    receipt_commit: commit,
+    next_step:
+      `The landing's receipt is committed on branch ${branch}. Get it onto ${where} the way this project takes ` +
+      `changes: ${pushStep}. Until it is there, the Unit's landing reads as not recorded. Once it is, ` +
+      `\`aidlc unit claim ${unit} --reopen --user-input '<why>'\` claims the next attempt when the Unit goes back to work.`,
+  };
+}
+
 // The end of a checkout's Unit scope, however the Unit got to main. A main
 // checkout returns to the integration branch, in the workspace and every
 // recorded code repository; a worktree cannot delete the branches it has
@@ -5349,7 +5548,7 @@ function closeCheckoutScope(
       checkout: "main",
       updated,
       notes,
-      next_step: "Run `next` to pick the next Unit.",
+      next_step: typeof result.next_step === "string" ? result.next_step : "Run `next` to pick the next Unit.",
     }));
     return;
   }
