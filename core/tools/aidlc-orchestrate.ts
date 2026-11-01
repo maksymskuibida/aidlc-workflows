@@ -5171,9 +5171,13 @@ export interface TeamConstructionBoard {
     owner: string;
     generation: number;
     observedActivity: string;
+    /** Its attempt has not landed: the Unit is worked under this claim. */
+    open: boolean;
     /** The worktree on this machine the claim is worked in, when one is. */
     checkout?: { path: string; branch: string | null };
   }>;
+  /** Complete on main with no landing receipt: merged without `unit land`. */
+  landingNotRecorded: UnitClaimOverview["landingNotRecorded"];
   awaitingMerge: Array<{
     unit: string;
     status: string;
@@ -5379,22 +5383,32 @@ function localClaimCheckouts(
 
 // Main's Unit Progress shows merged work only, so a Unit claimed elsewhere
 // reads as untouched there. Its row says it is in progress in its claim
-// (owner, attempt); the state file itself is not changed.
+// (owner, attempt); a Unit merged without `unit land` says its landing is not
+// recorded; the claim a landing leaves behind says nothing. The state file
+// itself is not changed.
 function markClaimedUnitRows(
   grid: string,
-  claims: TeamConstructionBoard["claims"],
+  overview: UnitClaimOverview,
 ): string {
-  const claimed = new Map(
-    claims.filter((claim) => claim.status === "claimed").map((claim) => [claim.unit, claim]),
-  );
-  if (claimed.size === 0) return grid;
+  const marks = new Map<string, { owner: string; text: string }>([
+    ...overview.claimed.map((claim) => [
+      claim.unit,
+      { owner: claim.owner, text: `in progress: claimed by ${claim.owner}, attempt ${claim.generation}` },
+    ] as const),
+    ...overview.landingNotRecorded.map((row) => [
+      row.unit,
+      { owner: row.owner, text: `complete, landing not recorded: claimed by ${row.owner}, attempt ${row.generation}` },
+    ] as const),
+  ]);
+  if (marks.size === 0) return grid;
   return grid.split("\n").map((line) => {
     const cells = line.split("|");
     if (cells.length < 4 || cells[0] !== "") return line;
-    const claim = claimed.get(cells[1].trim());
-    if (!claim) return line;
-    cells[1] = ` ${claim.unit} (in progress: claimed by ${claim.owner}, attempt ${claim.generation}) `;
-    cells[2] = ` ${claim.owner} `;
+    const unit = cells[1].trim();
+    const mark = marks.get(unit);
+    if (!mark) return line;
+    cells[1] = ` ${unit} (${mark.text}) `;
+    cells[2] = ` ${mark.owner} `;
     return cells.join("|");
   }).join("\n");
 }
@@ -5414,6 +5428,7 @@ function assembleTeamConstructionBoard(
       owner: claim.owner,
       generation: claim.generation,
       observedActivity: observedClaimActivity(claim),
+      open: overview.claimed.some((row) => row.unit === claim.unit),
       ...(checkouts.has(claim.unit) ? { checkout: checkouts.get(claim.unit)! } : {}),
     }));
   const awaitingMerge = transactions
@@ -5435,8 +5450,9 @@ function assembleTeamConstructionBoard(
     }))
     .sort((a, b) => compareBoardKeys(a.unit, b.unit));
   return {
-    grid: markClaimedUnitRows(grid, claims),
+    grid: markClaimedUnitRows(grid, overview),
     claims,
+    landingNotRecorded: overview.landingNotRecorded,
     awaitingMerge,
     claimable,
     blocked,
@@ -5472,7 +5488,7 @@ export function renderTeamConstructionBoard(
       (row) => `| ${row.unit} | ${row.blockedBy.join(", ")} |`,
     );
   const claimedSummary = board.claims
-    .filter((claim) => claim.status === "claimed")
+    .filter((claim) => claim.open)
     .map((claim) => `${claim.unit} (${claim.owner})`)
     .join(", ") || "none";
   const blockedSummary = board.blocked
@@ -5517,7 +5533,14 @@ export function renderTeamConstructionBoard(
       );
     }
   }
-  const claimedUnits = board.claims.filter((claim) => claim.status === "claimed");
+  for (const row of board.landingNotRecorded) {
+    nextActions.push(
+      `- \`${row.unit}\` is complete on main, but its landing is not recorded (a pull request merged it without ` +
+        `\`aidlc unit land\`; its claim, attempt ${row.generation} by ${row.owner}, is still open). Record it with ` +
+        `\`aidlc unit finish ${row.unit} --pr <owner>/<repo>#<n>\` and get the receipt it commits onto main.`,
+    );
+  }
+  const claimedUnits = board.claims.filter((claim) => claim.open);
   if (nextActions.length === 0) {
     nextActions.push(
       claimedUnits.length === 0
@@ -17510,6 +17533,14 @@ function teamUnitReopenByClaim(
     overview = cachedUnitClaimOverview(projectDir, { writeCache: false });
   } catch {
     return null;
+  }
+  if (overview.landingNotRecorded.some((row) => row.unit === unit)) {
+    return `Run nothing. Tell the person in one line: "Unit ${unit} is complete on main, but its landing is not ` +
+      "recorded: a pull request merged it without `aidlc unit land`, so it cannot be claimed again yet.\" Then give " +
+      `them the step that records it, run in a checkout of main with the pull request that merged it: ` +
+      `\`aidlc unit finish ${unit} --pr <owner>/<repo>#<n>\`. It commits the landing's receipt on a branch of its ` +
+      "own, which reaches main the way this project takes changes. Once it is on main, the Unit goes back to work " +
+      `as a new attempt: \`aidlc unit claim ${unit} --reopen --user-input '<why>'\`.`;
   }
   if (overview.claimed.some((claim) => claim.unit === unit)) {
     return `Run nothing. Tell the person in one line: "Unit ${unit} is being worked in its own checkout; ` +
