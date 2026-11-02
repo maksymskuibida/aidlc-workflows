@@ -78,6 +78,7 @@
 // per the tool/agent/human split (routing string-building to an LLM would
 // invert the whole thesis).
 
+import { codeGenerationIsTheStepHere } from "./aidlc-code-generation-here.ts";
 import {
   createHash,
   randomBytes,
@@ -694,7 +695,6 @@ import {
   codeGenerationResume,
   codeGenerationResumeNarration,
   codeGenerationStartNarration,
-  codeGenerationStepOnRecord,
   notePlanApprovalOverrideOffered,
   parkedWhereItStands,
   promotableTestingPosture,
@@ -17964,7 +17964,7 @@ function unitChoiceRefusal(stateContent: string, targetSlug: string): string {
 // once per command, and not where Code Generation is the step on record, where
 // the plan-approval guard judges the `jump execute` the print names.
 function jumpRunsInNext(projectDir: string, stateContent: string): boolean {
-  return !isReadOnlyEngineProbe() && jumpsMade === 0 && !codeGenerationStepOnRecord(
+  return !isReadOnlyEngineProbe() && jumpsMade === 0 && !codeGenerationIsTheStepHere(
     projectDir,
     stateContent,
     readActiveDirectiveMarker(projectDir, stateContent),
