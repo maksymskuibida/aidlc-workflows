@@ -747,8 +747,9 @@ and audit-shard transport directly from that commit. It does not merge or create
 a worktree. The claim-bound team shard may carry only that Unit's attempt
 receipts; main-authority rows, another Unit's record/receipt paths, extra shards,
 and other workflow-record paths are refused. Pin also compares the candidate
-base's Unit DAG, Unit kinds, and active per-Unit stage columns with live main;
-a changed Construction contract requires rebase and republish. Product-source
+base's entry for the Unit (its kind and dependencies) and the active per-Unit
+stage columns with live main; a changed Construction contract requires rebase and
+republish. A Unit the plan adds, drops or changes elsewhere does not. Product-source
 paths outside the Unit record tree are listed in the evidence for the human
 merge gate.
 
@@ -775,8 +776,8 @@ approval.
 ```
 
 Landing first fetches the current integration branch and revalidates the
-approved evidence against the live Unit DAG, Unit kinds, and active per-Unit
-stage columns. Contract drift refuses before Git mutation and requires rebase,
+approved evidence against the Unit's live entry in the Unit DAG (its kind and
+dependencies) and the active per-Unit stage columns. Contract drift refuses before Git mutation and requires rebase,
 republish, re-pin, a new dispatch bracket, and a new merge gate. It then merges
 pinned content while retaining main-owned engine metadata, folds the Unit row,
 and finalizes the transported audit receipts. For crash recovery, run the
