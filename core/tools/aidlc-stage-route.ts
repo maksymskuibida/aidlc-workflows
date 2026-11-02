@@ -31,6 +31,16 @@ export function isPerUnitStage(e: { slug: string; for_each?: string }): boolean 
   return e.for_each === PER_UNIT_FOR_EACH || KNOWN_PER_UNIT_STAGES.has(e.slug);
 }
 
+// True when `slug` runs before the first per-Unit stage of `stages` (a graph in
+// run order): Inception and earlier, where the Unit plan itself is made. A team
+// that goes back there is changing its Unit plan, which leaves each Unit's own
+// work to its claim. False for a slug the graph does not know.
+export function beforePerUnitBlock(stages: readonly { slug: string; for_each?: string }[], slug: string): boolean {
+  const at = stages.findIndex((stage) => stage.slug === slug);
+  const firstPerUnit = stages.findIndex((stage) => isPerUnitStage(stage));
+  return at !== -1 && firstPerUnit !== -1 && at < firstPerUnit;
+}
+
 // The order the work runs the stages in, which every walk (the next stage, the
 // solo Unit walk, the team fold, the next-stage hint, the plan listing) reads
 // through loadStageGraph. It is graph-number order, except that a phase's
