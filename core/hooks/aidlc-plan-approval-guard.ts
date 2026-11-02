@@ -96,7 +96,6 @@ import {
   auditFilePath,
   beforeDelimiter,
   type ClaudeCodeHookInput,
-  codeGenerationIsTheStep,
   composerProposalPath,
   docsRoot,
   ENGINE_TEXT_DIRS,
@@ -163,6 +162,7 @@ import {
   lockFolderHeldGoesOnStep,
 } from "../tools/aidlc-lock-line.ts";
 import { mainCheckoutChangeStep, personTurnStands } from "../tools/aidlc-message-store.ts";
+import { codeGenerationIsTheStepHere } from "../tools/aidlc-code-generation-here.ts";
 import type { planApprovalAskState } from "../tools/aidlc-plan-approval-ask.ts";
 import { aidlcToolInvocation, quoteCommandArgument, runtimeHarnessName } from "../tools/aidlc-runtime-paths.ts";
 import { RECORDABLE_PROJECT_BYPASSES } from "../tools/aidlc-settings.ts";
@@ -2582,7 +2582,7 @@ async function evaluate(
     // The step on record is the engine's to read too: where it is Code
     // Generation, `next --stage` leaves a jump to the `jump execute` judged here.
     const codeGenerationRelevant =
-      codeGenerationIsTheStep(directiveStage, durableStage) ||
+      codeGenerationIsTheStepHere(projectDir, state, directiveStage) ||
       (guardedDispatch && explicitPlanDispatch);
     if (!codeGenerationRelevant) return 0;
     const knownMutationTool =

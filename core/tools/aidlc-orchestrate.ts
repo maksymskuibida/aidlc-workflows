@@ -79,6 +79,7 @@
 // invert the whole thesis).
 
 import { unstartedRequirement } from "./aidlc-stage-route.ts";
+import { codeGenerationIsTheStepHere } from "./aidlc-code-generation-here.ts";
 import { teamUnitMemoryPath, unitMemoryPath } from "./aidlc-unit-memory.ts";
 import {
   createHash,
@@ -228,7 +229,6 @@ import {
   checkSummaryConfirmationEvidence,
   clearEarlierAttemptSummaryAnswer,
   clearActiveDirectiveMarker,
-  codeGenerationIsTheStep,
   codekbRepoName,
   discoverSiblingRepos,
   repoNameProblem,
@@ -17168,9 +17168,10 @@ function unitChoiceRefusal(stateContent: string, targetSlug: string): string {
 // once per command, and not where Code Generation is the step on record, where
 // the plan-approval guard judges the `jump execute` the print names.
 function jumpRunsInNext(projectDir: string, stateContent: string): boolean {
-  return !isReadOnlyEngineProbe() && jumpsMade === 0 && !codeGenerationIsTheStep(
+  return !isReadOnlyEngineProbe() && jumpsMade === 0 && !codeGenerationIsTheStepHere(
+    projectDir,
+    stateContent,
     readActiveDirectiveMarker(projectDir, stateContent)?.stage ?? "",
-    getField(stateContent, "Current Stage") ?? "",
   );
 }
 

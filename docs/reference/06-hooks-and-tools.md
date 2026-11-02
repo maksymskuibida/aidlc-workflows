@@ -1743,6 +1743,16 @@ This is one of the framework's six flow-altering hooks and one of its five `PreT
 
 The redo `jump execute` that `next` names to run Reverse Engineering, which the person put back on the plan behind the cursor before Construction started (Code Generation only just entered, nothing of it written), passes too, by the same check `next` prints it from: it is their change carried out, it leaves the finished stages and Code Generation as they are, and the work comes back to Code Generation after it.
 
+**A team-owned intent's unscoped checkout.** Under `Unit Ownership: team` a
+Unit's Code Generation is built only in the checkout that claimed it. In a
+checkout with no Unit scope of its own (the main checkout, a worktree cut from
+main), `Current Stage: code-generation` alone does not make Code Generation the
+step, as it does elsewhere (`codeGenerationIsTheStepHere`): a Unit's branch
+carries its walk's Current Stage, and a pull request built from it by hand
+leaves main reading code-generation. There only a Code Generation step the
+engine issued in that checkout is judged. A claimed Unit's checkout, and a solo
+intent, are judged as before.
+
 **A Code Generation run on its own with no work.** With no work selected,
 `next --stage code-generation --single` records the run's start in the space's
 own record, and its plan question is the open step there, bound to the empty
