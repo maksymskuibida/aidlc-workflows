@@ -732,6 +732,16 @@ mirror, and audit shard:
 The command requires a clean tracked worktree and CAS-updates the live claim ref
 to a candidate commit that preserves both claim and implementation history.
 
+A checkout whose own audit shard is on main (it ran the earlier phases, or a
+landed attempt of this Unit was worked there) also writes rows outside the
+Unit's team shard: while no Unit is claimed, and after an attempt's candidate.
+Publish moves every row the branch added to this clone's shard, and to this
+Unit's earlier attempts' team shards, into the attempt's team shard in one
+commit, in the order the audit reader reads them, and puts those shards back
+as main has them. None of those rows is the attempt's evidence. Rows the branch
+added to another clone's or Unit's shard on main are refused, with the
+`git checkout` that puts the shard back.
+
 ### `/aidlc unit pin <unit>` — Pin candidate evidence
 
 Run from unscoped main:

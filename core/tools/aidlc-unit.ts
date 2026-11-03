@@ -1630,47 +1630,126 @@ function teamAuditShard(
   return `${shard.replace(/\.md$/, "")}-${unit}-g${generation}.md`;
 }
 
-// A Unit claimed before its rows had a team shard of their own wrote them into
-// the clone's shard, which main already holds. One commit on the Unit's branch
-// moves them: the clone's shard goes back to main's bytes, and the rows after
-// them (shards are append-only) open the team shard. The branch then lands the
-// way a Unit claimed in a fresh clone does. Done once; a branch that already
-// holds the split is left as it is.
-function splitTeamAuditShard(
+// The checkout's rows also reach the branch outside its team shard: a Unit
+// claimed before Units had team shards wrote into the clone's shard; while no
+// Unit is claimed the checkout writes its own shard; and a landed attempt's
+// session goes on after its candidate into that attempt's team shard. Those
+// shards are on main, and a published Unit may add only a shard of its own.
+// One commit on the Unit's branch moves every row the branch appended to them
+// into the attempt's team shard, merged with its rows in the order the audit
+// reader reads them (time, then shard name, then position), and puts each
+// shard back to main's bytes. None of the moved rows is this attempt's (it has
+// no Unit, or an earlier attempt), so the candidate's projection withholds them
+// and pin counts none. Rows the branch appended to another clone's or Unit's
+// shard on main are not this Unit's to move: refused, before anything changes.
+// A branch with nothing appended is left as it is.
+function moveRowsToTeamShard(
   projectDir: string,
   recordPrefix: string,
   baseOid: string,
   cloneShard: string,
   teamShard: string,
   unit: string,
+  generation: number,
 ): boolean {
-  const clonePath = `${recordPrefix}/audit/${cloneShard}`;
-  const teamPath = `${recordPrefix}/audit/${teamShard}`;
+  const auditDir = `${recordPrefix}/audit`;
+  const teamPath = `${auditDir}/${teamShard}`;
+  const stem = cloneShard.replace(/\.md$/, "");
+  const earlierAttempt = (name: string): boolean => {
+    if (!name.startsWith(`${stem}-${unit}-g`)) return false;
+    const attempt = name.slice(`${stem}-${unit}-g`.length).replace(/\.md$/, "");
+    return /^[1-9][0-9]*$/.test(attempt) && name.endsWith(".md") && Number(attempt) < generation;
+  };
   return withAuditLock(projectDir, () => {
-    const base = gitTextAt(projectDir, baseOid, clonePath);
-    const head = gitPathExistsAt(projectDir, "HEAD", clonePath) ? gitTextAt(projectDir, "HEAD", clonePath) : base;
-    if (head === base) return false;
-    if (!head.startsWith(base)) {
+    const changed = gitOutput(
+      projectDir,
+      ["diff", "--no-renames", "--name-status", baseOid, "HEAD", "--", auditDir],
+      "Cannot compare the branch's audit shards with main's",
+    )
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("M\t"))
+      .map((line) => line.slice(2));
+    const sources: Array<{ path: string; tail: string }> = [];
+    const foreign: string[] = [];
+    for (const path of changed) {
+      const name = basename(path);
+      if (name === teamShard) continue;
+      const base = gitTextAt(projectDir, baseOid, path);
+      const head = gitTextAt(projectDir, "HEAD", path);
+      const own = name === cloneShard || earlierAttempt(name);
+      if (!head.startsWith(base)) {
+        // Behind main there: pin names that shard; only this clone's own rows are moved.
+        if (!own) continue;
+        fail(
+          `Unit "${unit}" cannot move its audit rows out of ${path}: on this branch the shard does not begin ` +
+            "with the rows main holds. Bring main into the branch, then publish again.",
+        );
+      }
+      if (!own) {
+        foreign.push(path);
+        continue;
+      }
+      const tail = head.slice(base.length).replace(/\r\n/g, "\n");
+      if (!base.replace(/\r\n/g, "\n").endsWith("\n---\n") && base.trim() !== AUDIT_SHARD_HEADER.trim()) {
+        fail(`Unit "${unit}" cannot move its audit rows out of ${path}: main's copy does not end with a whole row.`);
+      }
+      sources.push({ path, tail });
+    }
+    if (foreign.length > 0) {
       fail(
-        `Unit "${unit}" cannot move its audit rows out of ${clonePath}: on this branch the shard does not begin ` +
-          "with the rows main holds. Bring main into the branch, then publish again.",
+        `Unit "${unit}" cannot publish rows this branch added to ${foreign.join(", ")}: main holds ` +
+          `${foreign.length === 1 ? "that shard" : "those shards"} for another clone or Unit, and a published Unit ` +
+          "adds only its own team shard. Put each back as main has it " +
+          `(git checkout ${baseOid} -- ${foreign.join(" ")}), commit, and publish again.`,
       );
     }
-    if (gitPathExistsAt(projectDir, "HEAD", teamPath)) {
-      fail(`Unit "${unit}" cannot move its audit rows: ${teamPath} already exists on this branch.`);
+    if (sources.length === 0) return false;
+    // Rows appended since HEAD would be lost by the rewrite; publish wants them committed.
+    const touched = [...sources.map((source) => source.path), teamPath];
+    const pending = git(projectDir, ["status", "--porcelain", "--untracked-files=all", "--", ...touched]);
+    if (!pending.ok || pending.stdout.trim()) {
+      fail(`Unit "${unit}" cannot move its audit rows: ${touched.join(", ")} hold rows not committed yet. Commit them, then publish again.`);
     }
-    const restored = git(projectDir, ["checkout", baseOid, "--", clonePath]);
-    if (!restored.ok) fail(`Cannot restore ${clonePath}: ${restored.stderr.trim()}`);
-    writeFileSync(join(projectDir, teamPath), AUDIT_SHARD_HEADER + head.slice(base.length), "utf-8");
+    const rows = (text: string): Array<{ block: string; timestamp: string }> =>
+      text.split("\n---\n")
+        .filter((block) => block.trim().length > 0)
+        .map((block) => ({ block, timestamp: auditBlockField(block, "Timestamp") ?? "" }));
+    const team = gitPathExistsAt(projectDir, "HEAD", teamPath)
+      ? gitTextAt(projectDir, "HEAD", teamPath).replace(/\r\n/g, "\n")
+      : "";
+    const lists = [
+      { name: teamShard, rows: rows(team.startsWith(AUDIT_SHARD_HEADER) ? team.slice(AUDIT_SHARD_HEADER.length) : team) },
+      ...sources.map((source) => ({ name: basename(source.path), rows: rows(source.tail) })),
+    ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    // Each shard keeps its own append order; across them, time, then shard name.
+    const merged: string[] = [];
+    const at = lists.map(() => 0);
+    for (;;) {
+      let next = -1;
+      lists.forEach((list, index) => {
+        if (at[index] >= list.rows.length) return;
+        if (next < 0 || list.rows[at[index]].timestamp < lists[next].rows[at[next]].timestamp) next = index;
+      });
+      if (next < 0) break;
+      merged.push(lists[next].rows[at[next]].block);
+      at[next] += 1;
+    }
+    for (const { path } of sources) {
+      const restored = git(projectDir, ["checkout", baseOid, "--", path]);
+      if (!restored.ok) fail(`Cannot restore ${path}: ${restored.stderr.trim()}`);
+    }
+    writeFileSync(join(projectDir, teamPath), AUDIT_SHARD_HEADER + merged.map((block) => `${block}\n---\n`).join(""), "utf-8");
     const added = git(projectDir, ["add", "--", teamPath]);
     if (!added.ok) fail(`Cannot stage ${teamPath}: ${added.stderr.trim()}`);
+    const names = sources.map((source) => basename(source.path));
     const committed = git(projectDir, [
       "commit", "-q", "-m", `Unit ${unit}: its audit rows move to its team shard ${teamShard}`,
-      "-m", `${cloneShard} is already on main, and a published Unit may only add a shard of its own. ` +
-        `The rows this branch appended to it now open ${teamShard}; ${cloneShard} is as main has it.`,
-      "--", clonePath, teamPath,
+      "-m", `${names.join(", ")} ${names.length === 1 ? "is" : "are"} already on main, and a published Unit may only ` +
+        `add a shard of its own. The rows this branch appended to ${names.length === 1 ? "it" : "them"} are now in ` +
+        `${teamShard}, in time order; ${names.length === 1 ? "it is" : "each is"} as main has it.`,
+      "--", ...sources.map((source) => source.path), teamPath,
     ]);
-    if (!committed.ok) fail(`Cannot commit the audit shard split: ${gitFailure(committed)}`);
+    if (!committed.ok) fail(`Cannot commit the audit shard move: ${gitFailure(committed)}`);
     return true;
   });
 }
@@ -2208,12 +2287,12 @@ function publishUnit(args: string[], projectDir?: string): void {
   const auditShard = current.payload.clone_audit_shard !== undefined
     ? claimShard
     : teamAuditShard(pd, publicationBaseOid, recordPrefix, claimShard, unit, current.generation);
-  if (auditShard !== cloneShard) {
-    if (splitTeamAuditShard(pd, recordPrefix, publicationBaseOid, cloneShard, auditShard, unit)) {
-      headOid = gitOutput(pd, ["rev-parse", "HEAD"], "Cannot resolve candidate HEAD");
-    }
-    // Rows written from here on are the team shard's.
-    if (stamp.audit_shard !== auditShard) writeUnitScopeStamp(pd, { ...stamp, audit_shard: auditShard });
+  if (moveRowsToTeamShard(pd, recordPrefix, publicationBaseOid, cloneShard, auditShard, unit, current.generation)) {
+    headOid = gitOutput(pd, ["rev-parse", "HEAD"], "Cannot resolve candidate HEAD");
+  }
+  // Rows written from here on are the team shard's.
+  if (auditShard !== cloneShard && stamp.audit_shard !== auditShard) {
+    writeUnitScopeStamp(pd, { ...stamp, audit_shard: auditShard });
   }
   const rawHeadTree = gitOutput(
     pd,
