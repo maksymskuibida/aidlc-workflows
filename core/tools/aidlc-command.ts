@@ -241,6 +241,11 @@ export const UNIT_GRAMMAR: Readonly<Record<string, UnitGrammar>> = {
       "[--accept-released-attempt --user-input <acknowledgment>]",
   },
   "merge-status": { name: true, options: [], usage: "unit merge-status <unit>" },
+  merged: {
+    name: true,
+    options: ["repo", "message", "request-file", "person-words"],
+    usage: "unit merged <unit> --repo <repo> [--message <id>] (--request-file <file> | --person-words <text>)",
+  },
   participate: { name: false, options: [], usage: "unit participate" },
   pin: { name: true, options: [], usage: "unit pin <unit>" },
   preflight: { name: true, options: [], usage: "unit preflight <unit>" },
