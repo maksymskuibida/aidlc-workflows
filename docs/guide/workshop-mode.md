@@ -9,12 +9,72 @@ engine contract is scope-agnostic:
 - a valid Unit dependency DAG
 - a shared git namespace, or sibling worktrees sharing one local ref database
 
-Team ownership currently requires the workspace root itself to be the source Git
-repository. Work with a recorded sibling-repo set is not asked who builds its
-Units: when Construction starts, AI-DLC says in one line that this session
-builds them, because teams each owning a Unit is not available yet for work
-across repos, and `set-unit-ownership team` refuses with the same line before
+Team ownership requires the workspace to be a Git repository. Work with a
+recorded sibling-repo set in a workspace that is not one is not asked who builds
+its Units: when Construction starts, AI-DLC says in one line that this session
+builds them, and `set-unit-ownership team` refuses with the same line before
 changing state.
+
+### Teams across repos
+
+When the work records code repos (`api/`, `web/`, each a Git repo of its own
+inside the workspace) and the workspace is a Git repository, teams own its Units
+as for work in one repo: claim, publish, pin, gate and land, the Unit's records
+in the workspace. Each code repo's part of a Unit reaches that repo's main
+through the repo's own review, merged whichever way the repo merges (a merge
+commit, a squash or a rebase). AI-DLC pushes nothing and opens no pull request:
+
+- `unit publish` records, on the claim, each code repo the Unit's Code
+  Generation wrote to (its source manifest): the branch, the commit it started
+  from, each head published, every changed file's blob and the change's
+  patch-id. A folder the manifest names stands for the files changed under it,
+  and a write in a recorded checkout of a code repo (`<label>@checkout/...`, a
+  worktree recorded with `intent add-checkout`) counts for that repo, read in
+  the checkout's folder. A review fix made in the Unit's checkout and published
+  again adds its head.
+- `unit pin` reads each repo on its fetched integration branch and says how far
+  the code merged (`code_merges`, "api merged, web not merged yet (1 of 2
+  merged)"); the merge question says it too.
+- `unit gate --decision approve` waits until every repo has merged, and checks
+  again at the gate, so no re-pin is needed once the code merges.
+- `unit merged <unit> --repo <repo> --request-file <file>` is the lead's word
+  that a repo merged where the check cannot see it (a fix made straight on the
+  pull request, say): the agent writes their words to the file first
+  (`--person-words <text>` passes them inline, `--message <id>` names the
+  message they said them in). The words go on the Unit's claim, so pin the Unit
+  again for its merge gate to read them; a republish whose head in that repo
+  moved drops them.
+
+The merge check is the one upstream's draft
+[#2783](https://github.com/awslabs/aidlc-workflows/pull/2783) builds (its
+`aidlc-unit-teams.ts`), so work started this way keeps its flow when #2783 lands.
+It records no audit event and no state field of its own.
+
+The rest is the project's own rules, kept in its `memory/project.md` or the
+workspace's agent instructions, for example:
+
+- **A team Unit is built in its own worktree.** Make a Git worktree of the
+  workspace and, inside it, a worktree of each code repo at the same path on
+  the Unit's branch, run from the workspace clone:
+  `git worktree add -b ws/<unit> ../ws-<unit>`, then
+  `git -C api fetch origin && git -C api worktree add -b unit/<unit> "$PWD/../ws-<unit>/api" origin/main`
+  (a relative path would be read from inside `api/`). Claim, build and publish
+  from `../ws-<unit>`; a new clone selects its intent once. When the Unit has
+  landed, remove the code repo's worktree first, then the workspace's.
+- **Code reaches each code repo's main through a pull request.** After Code
+  Generation is approved and committed in `api/` on `unit/<unit>`, push the
+  branch and open the pull request in `api/`; its body links the Unit's records,
+  `compare/main...claim/<id8>/<unit>` on the workspace repository. Then
+  `aidlc unit publish <unit>`. Code pull requests may be squash-merged.
+- **The Unit's records reach the workspace's main through the lead's records
+  pull request,** opened after each `aidlc unit land` (or a batch the lead
+  picks), and **merged with a merge commit, never a squash or a rebase.** A
+  squash leaves the claim commit out of main's history: the developer's next
+  pull then conflicts in `aidlc-state.md`, and their checkout stays scoped to
+  the landed Unit. Its content is what the stage gates, pin and the merge gate
+  already approved.
+- **The lead commits and pushes Inception's records before running `next`
+  again** after choosing several teams.
 
 The integration lead works from unscoped main. Each delivery team works from a
 checkout stamped to one claimed Unit. A claimed checkout runs that Unit's exact

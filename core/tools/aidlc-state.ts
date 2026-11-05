@@ -2,6 +2,7 @@ import { DEFAULT_SUBPROCESS_TIMEOUT_MS } from "./aidlc-runtime-budget.ts";
 import { projectDirFlag, settleClaudeTurnsFirst } from "./aidlc-claude-turn-pending.ts";
 import { CHECKPOINT_GLOSS } from "./aidlc-guard-fences.ts";
 import { git, isGitRepo } from "./aidlc-git.ts";
+import { workspaceHomeLocation } from "./aidlc-unit-teams.ts";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -1757,7 +1758,7 @@ function handleSetUnitOwnership(given: string[]): void {
     }
     if (value === "team") {
       const repos = intentRepos(pd);
-      if (repos.length > 0) {
+      if (repos.length > 0 && workspaceHomeLocation(pd) === null) {
         error(`${teamsAcrossReposLine(repos.length)} Carry on with \`${entrySkillInvocation()}\`.`);
       }
       const resolution = resolveBoltDag(pd);
