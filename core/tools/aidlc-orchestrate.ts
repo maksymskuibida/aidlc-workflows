@@ -79,6 +79,7 @@
 // invert the whole thesis).
 
 import { projectDirFlag, settleClaudeTurnsFirst } from "./aidlc-claude-turn-pending.ts";
+import { workspaceHomeLocation } from "./aidlc-unit-teams.ts";
 import {
   createHash,
   randomBytes,
@@ -5371,7 +5372,7 @@ function constructionStaffingAsk(
   }
   const order = readConstructionIteration(stateContent) === "unit-major" ? "one after another" : "stage by stage";
   const repos = intentRepos(projectDir);
-  if (repos.length > 0) {
+  if (repos.length > 0 && workspaceHomeLocation(projectDir) === null) {
     if (speaks) sayWithStepOnce(projectDir, teamsAcrossReposLine(repos.length, units));
     return null;
   }
