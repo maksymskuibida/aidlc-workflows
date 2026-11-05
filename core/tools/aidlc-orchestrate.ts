@@ -78,6 +78,7 @@
 // per the tool/agent/human split (routing string-building to an LLM would
 // invert the whole thesis).
 
+import { teamsAcrossReposAllowed } from "./aidlc-unit-teams.ts";
 import {
   createHash,
   randomBytes,
@@ -5124,7 +5125,7 @@ function constructionStaffingAsk(
   }
   const order = readConstructionIteration(stateContent) === "unit-major" ? "one after another" : "stage by stage";
   const repos = intentRepos(projectDir);
-  if (repos.length > 0) {
+  if (repos.length > 0 && !teamsAcrossReposAllowed(projectDir)) {
     if (speaks) sayWithStepOnce(projectDir, teamsAcrossReposLine(repos.length, units));
     return null;
   }

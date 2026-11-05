@@ -189,6 +189,7 @@ export const UNIT_VERBS: ReadonlyMap<string, boolean> = new Map([
   ["claim", true],
   ["gate", true],
   ["land", true],
+  ["merged", true],
   ["merge-status", true],
   ["participate", false],
   ["pin", true],

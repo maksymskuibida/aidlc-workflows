@@ -260,6 +260,7 @@ export const ROUTES: readonly Route[] = [
       "unit claim <unit>",
       "unit gate <unit> --decision <approve|reject> (--user-input <text> | --request-file <file>)",
       "unit land <unit> [--step git|state|audit|all] [--target <branch>] [--accept-released-attempt --user-input <text>]",
+      "unit merged <unit> --repo <repo> --user-input <text>",
       "unit merge-status <unit>",
       "unit participate",
       "unit pin <unit>",

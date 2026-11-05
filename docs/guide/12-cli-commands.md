@@ -52,6 +52,7 @@ diagnostic and lifecycle routes.
 | `/aidlc unit pin <unit>` | Pin and validate one completed candidate OID from unscoped main |
 | `/aidlc unit gate <unit> ...` | Record the merge decision against the pinned OID and generation |
 | `/aidlc unit land <unit> ...` | Run the resumable git → state → audit landing transaction |
+| `/aidlc unit merged <unit> --repo <repo> --user-input <text>` | Record the lead's word that a code repo's part of the pinned Unit merged |
 | `/aidlc unit merge-status <unit>` | Read the local pinned-merge transaction journal |
 | `/aidlc unit status` | Read the current claimable, claimed, and dependency-blocked Unit sets |
 | `/aidlc --doctor [--check-updates]` | Run a health check; the explicit flag refreshes update metadata |
@@ -738,6 +739,11 @@ local record under the intent record's `.aidlc-engine/audit/`, which AI-DLC's
 Unit's evidence that pin accepts. So the candidate is the commit as it is, and
 after the Unit lands, a plain pull of main in the claiming checkout
 fast-forwards with every row it wrote kept.
+For work that records code repos, publish also records each code repo the
+Unit's Code Generation wrote to on the claim: its branch, the commit it started
+from, each head published, every changed file's blob and the change's patch-id
+(a folder the source manifest names stands for the files changed under it).
+Nothing is pushed; see [Teams across repos](workshop-mode.md#teams-across-repos).
 
 ### `/aidlc unit pin <unit>` — Pin candidate evidence
 
@@ -765,6 +771,10 @@ A rule kept in the claimed checkout (the space's `memory/project.md` or
 Pin and land also refuse a Unit until every Unit it depends on has landed on
 main.
 
+For work across repos, pin reads each recorded code repo on its fetched
+integration branch and says how far the Unit's code merged (`code_merges`), and
+the merge gate's `code` line puts it in the question.
+
 ### `/aidlc unit gate <unit>` — Decide the pinned merge
 
 ```bash
@@ -784,6 +794,19 @@ regular merge into the integration branch pin fetched, so the reviewed OID
 remains a direct parent. A moved ref, changed generation, or HOLD-MERGE marker
 requires an explicit re-pin before approval. On approve, its output names the
 land command (`land`), which the agent runs in the same turn.
+For work across repos, approve waits until every code repo the Unit wrote to
+has merged (a merge commit, a squash or a rebase all count) and checks again at
+the gate, so no re-pin is needed once the code merges.
+
+### `/aidlc unit merged <unit> --repo <repo>` — The lead's word that a repo merged
+
+```bash
+/aidlc unit merged user-profile-api --repo api \
+  --user-input "api's change is in, fixed on the pull request"
+```
+
+For a merge the check cannot see, the lead's word counts the repo merged for the
+pinned Unit. It is kept on the merge journal, so a re-pin asks for it again.
 
 The gate's audit row keeps what the person said after the pin and the message it
 came in (`Person Reply`, `Message Id`) beside the agent's account, as a stage
