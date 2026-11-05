@@ -102,7 +102,11 @@ import {
   setField,
   writeUnitScopeStamp,
   writeClaimGeneration,
+  isGitRepoDir,
+  readUnitSourceManifest,
+  repoDir,
 } from "./aidlc-lib.js";
+import { blobsAt, mergedStatus, patchIdOf, type RepoResult, unitMergeVerdict, writesByRepo } from "./aidlc-unit-teams.ts";
 import {
   parseTestingContract,
   recordedApprovalFingerprint,
@@ -198,6 +202,103 @@ export interface UnitClaimPayload {
   candidate_head_oid?: string;
   /** A landed Unit claimed again (`claim --reopen`): the attempt that landed, and the person's reason. */
   reopen?: { landed_generation: number; reason: string };
+  /** Each code repo the Unit's Code Generation wrote to, as #2783's push records it. */
+  code_repos?: RepoResult[];
+}
+
+// A Unit's code in repos of its own (the work records them) reaches each one's
+// integration branch through that repo's own review, merged whichever way the
+// repo merges. Publish records each repo's part on the claim, pin and gate read
+// it merged with #2783's merge check (aidlc-unit-teams.ts), and the lead's word
+// counts a repo merged where the check cannot see it (`unit merged`). Nothing
+// is pushed or opened for the person; no audit event records it.
+
+// The lead's word that a code repo merged, kept on the pinned Unit's merge journal.
+type SaidMerged = { repo: string; words: string; at: string };
+type CodeMergeJournal = UnitMergeTransaction & { said_merged?: SaidMerged[] };
+
+// The remote a code repo merges through: origin, else its one remote.
+function codeRepoRemote(dir: string): string | null {
+  const remotes = git(dir, ["remote"]).stdout.split(/\r?\n/).map((name) => name.trim()).filter(Boolean);
+  return remotes.includes("origin") ? "origin" : remotes.length === 1 ? remotes[0] : null;
+}
+
+// A code repo's integration branch, as #2783 reads it: the remote's HEAD, else
+// its main or master.
+function codeRepoIntegration(dir: string, remote: string): string {
+  const head = git(dir, ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`]).stdout.trim();
+  if (head) return head;
+  for (const name of ["main", "master"]) {
+    if (git(dir, ["rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/${name}`]).ok) return `${remote}/${name}`;
+  }
+  return `${remote}/main`;
+}
+
+// Each code repo the Unit's Code Generation wrote to, read in the Unit's
+// checkout at publish, as #2783's push builds it: the branch, the commit the
+// Unit started from, every head published (the last is current), each changed
+// path's blob at the head (null when deleted) and the change's patch-id. The
+// source manifest may name a folder; it stands for the files changed under it.
+// The workspace's own repo is the candidate itself, and a repo this checkout
+// does not hold is left out.
+function codeRepoResults(pd: string, unit: string, earlier: readonly RepoResult[]): RepoResult[] {
+  const manifest = readUnitSourceManifest(pd, "code-generation", unit);
+  if (!manifest.ok) return [];
+  const before = new Map(earlier.map((repo) => [repo.repo, repo]));
+  const results: RepoResult[] = [];
+  for (const [repo, paths] of writesByRepo(pd, manifest.manifest.writes)) {
+    if (repo === ".") continue;
+    const dir = repoDir(pd, repo);
+    if (!isGitRepoDir(dir)) continue;
+    const head = git(dir, ["rev-parse", "HEAD"]).stdout.trim();
+    if (!head) continue;
+    const remote = codeRepoRemote(dir);
+    const base = before.get(repo)?.base ??
+      ((remote === null ? "" : git(dir, ["merge-base", "HEAD", codeRepoIntegration(dir, remote)]).stdout.trim()) || head);
+    const changed = git(dir, ["diff", "--name-only", "--no-renames", base, head, "--", ...paths]).stdout
+      .split(/\r?\n/).filter(Boolean);
+    const blobs = blobsAt(dir, head, changed);
+    const id = patchIdOf(dir, base, head, changed);
+    results.push({
+      repo,
+      branch: git(dir, ["branch", "--show-current"]).stdout.trim(),
+      base,
+      heads: [...new Set([...(before.get(repo)?.heads ?? []), head])],
+      paths: Object.fromEntries(changed.map((path) => [path, blobs.get(path) ?? null])),
+      ...(id ? { patch_id: id } : {}),
+    });
+  }
+  return results;
+}
+
+// Whether each recorded code repo has merged, read in the checkout that pins
+// and gates, on that repo's integration branch fetched there. The lead's word
+// counts a repo merged; a repo this checkout does not hold reads as not merged.
+function codeRepoMerges(
+  pd: string,
+  results: readonly RepoResult[],
+  said: readonly SaidMerged[],
+): Array<{ repo: string; merged: boolean; how?: string; commit?: string }> {
+  return results.map((result) => {
+    if (said.some((entry) => entry.repo === result.repo)) return { repo: result.repo, merged: true, how: "the lead's word" };
+    const dir = repoDir(pd, result.repo);
+    const remote = isGitRepoDir(dir) ? codeRepoRemote(dir) : null;
+    if (remote === null) return { repo: result.repo, merged: false };
+    git(dir, ["fetch", "-q", remote]);
+    const verdict = unitMergeVerdict(dir, codeRepoIntegration(dir, remote), result);
+    return verdict.merged
+      ? { repo: result.repo, merged: true, how: verdict.how, commit: verdict.commit }
+      : { repo: result.repo, merged: false };
+  });
+}
+
+// The merge question's line about the Unit's code: how far each repo merged,
+// and that Approve waits for the rest.
+function codeMergesLine(unit: string, merges: ReadonlyArray<{ repo: string; merged: boolean }>): string {
+  const status = mergedStatus(merges);
+  return merges.every((merge) => merge.merged)
+    ? `Unit "${unit}"'s code: ${status}.`
+    : `Unit "${unit}"'s code: ${status}. Approve waits until every repo has merged; say so in the question.`;
 }
 
 export interface UnitClaimView {
@@ -2179,9 +2280,11 @@ function publishUnit(args: string[], projectDir?: string): void {
         `Pin will refuse this candidate: ${outsideUnitTreeNextStep(unit, publicationIntegrationRef)}`,
     }
     : {};
+  const codeRepos = codeRepoResults(pd, unit, current.payload.code_repos ?? []);
   if (
     current.payload.candidate_tree_oid === headTree &&
     current.payload.candidate_head_oid === headOid &&
+    JSON.stringify(current.payload.code_repos ?? []) === JSON.stringify(codeRepos) &&
     current.payload.base_oid === publicationBaseOid &&
     current.payload.integration_ref === publicationIntegrationRef
   ) {
@@ -2205,6 +2308,7 @@ function publishUnit(args: string[], projectDir?: string): void {
     integration_ref: publicationIntegrationRef,
     candidate_tree_oid: headTree,
     candidate_head_oid: headOid,
+    ...(codeRepos.length > 0 ? { code_repos: codeRepos } : {}),
   };
   // The claim's second parent hands this checkout's local record over with its
   // commit: reachable from the claim ref for a teammate's adopt, never in the
@@ -2641,6 +2745,7 @@ function pinUnit(args: string[], projectDir?: string): void {
   };
   // The journal first: the cache then reads a reopened Unit's pinned attempt as the one on record.
   writeUnitMergeTransaction(pd, transaction);
+  const codeMerges = codeRepoMerges(pd, claim.payload.code_repos ?? [], []);
   updateCachedClaim(pd, claim);
   console.log(JSON.stringify({
     pinned: true,
@@ -2650,7 +2755,11 @@ function pinUnit(args: string[], projectDir?: string): void {
     generation: claim.generation,
     evidence,
     gate_required: true,
-    merge_gate: pinMergeGateStep(pd, transaction),
+    ...(codeMerges.length > 0 ? { code_merges: mergedStatus(codeMerges) } : {}),
+    merge_gate: {
+      ...pinMergeGateStep(pd, transaction),
+      ...(codeMerges.length > 0 ? { code: codeMergesLine(unit, codeMerges) } : {}),
+    },
     ...(superseded
       ? { superseded: { pinned_oid: superseded.pinned_oid, status: superseded.status } }
       : {}),
@@ -2683,6 +2792,33 @@ function approvalOutlivedByRepublish(
   }
   if (git(projectDir, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).ok) return false;
   return firstParentMergeOf(projectDir, transaction) === null;
+}
+
+// `unit merged <unit> --repo <repo> --user-input <words>`: the lead's word that
+// a code repo's part of the pinned Unit merged where the check cannot see it
+// (#2783's `unit merged`). Kept on the merge journal, so a re-pin asks for it again.
+function saidMerged(args: string[], projectDir?: string): void {
+  const { positional, flags } = parseArgs(args);
+  const unit = positional[0];
+  const words = flags["user-input"]?.trim();
+  if (!unit || !flags.repo || !words) fail("Usage: aidlc-unit merged <unit> --repo <repo> --user-input <text>");
+  if (!humanPresenceGuardDisabled() && isNonAnswer(words)) {
+    fail(`Refusing the word that ${flags.repo} merged: --user-input "${words}" is not the person's own words.`);
+  }
+  const pd = resolveProjectDir(projectDir);
+  const transaction = readUnitMergeTransaction(pd, unit) as CodeMergeJournal | null;
+  if (transaction?.status !== "pinned") fail(`Unit "${unit}" has no pinned merge transaction; pin it first.`);
+  assertTransactionIdentity(pd, transaction);
+  const repos = currentPinnedClaim(pd, transaction).claim.payload.code_repos ?? [];
+  if (!repos.some((repo) => repo.repo === flags.repo)) {
+    fail(`Unit "${unit}" changed ${repos.map((repo) => repo.repo).join(", ") || "no code repo"}, not ${flags.repo}.`);
+  }
+  const said = [
+    ...(transaction.said_merged ?? []).filter((entry) => entry.repo !== flags.repo),
+    { repo: flags.repo, words, at: isoTimestamp() },
+  ];
+  writeUnitMergeTransaction(pd, { ...transaction, said_merged: said } as UnitMergeTransaction);
+  console.log(JSON.stringify({ unit, repo: flags.repo, notice: `${flags.repo} counts as merged for ${unit}, in your words.` }));
 }
 
 function gateUnitMerge(args: string[], projectDir?: string): void {
@@ -2754,6 +2890,16 @@ function gateUnitMerge(args: string[], projectDir?: string): void {
       ...(decision === "approve" ? { land: approvedLandStep(transaction) } : {}),
     }));
     return;
+  }
+  if (decision === "approve" && (claim.payload.code_repos ?? []).length > 0) {
+    const merges = codeRepoMerges(pd, claim.payload.code_repos ?? [], (transaction as CodeMergeJournal).said_merged ?? []);
+    if (merges.some((merge) => !merge.merged)) {
+      fail(
+        `Unit "${unit}"'s code is not merged yet: ${mergedStatus(merges)}. Approve once every repo has merged; ` +
+          `a merge the check cannot see counts with the lead's word: aidlc unit merged ${unit} --repo <repo> ` +
+          "--user-input '<their words>'.",
+      );
+    }
   }
   const afterPin = requireReplyAfterPin(pd, transaction);
   const terms = pinnedMergeGate(transaction);
@@ -4695,6 +4841,7 @@ export function main(argv: string[]): void {
     else if (command === "pin") pinUnit(args, projectDir);
     else if (command === "gate") gateUnitMerge(args, projectDir);
     else if (command === "land") landUnit(args, projectDir);
+    else if (command === "merged") saidMerged(args, projectDir);
     else if (command === "merge-status") {
       const unit = args[0];
       if (!unit) fail("Usage: aidlc-unit merge-status <unit>");
@@ -4708,7 +4855,7 @@ export function main(argv: string[]): void {
       console.log(JSON.stringify(unitClaimOverview(resolveProjectDir(projectDir)), null, 2));
     } else {
       fail(
-        "Usage: aidlc-unit <adopt|claim|release|participate|publish|pin|gate|land|merge-status|status> ...",
+        "Usage: aidlc-unit <adopt|claim|release|participate|publish|pin|gate|land|merged|merge-status|status> ...",
       );
     }
   } catch (error) {
