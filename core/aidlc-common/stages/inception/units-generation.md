@@ -26,6 +26,10 @@ consumes:
     required: true
   - artifact: stories
     required: false
+  - artifact: mockups
+    required: false
+  - artifact: interaction-spec
+    required: false
 requires_stage:
   - domain-design
 sensors:
@@ -38,7 +42,7 @@ scopes:
   - mvp
   - classic
   - workshop
-inputs: <record>/inception/domain-design/components.md, <record>/inception/requirements-analysis/requirements.md, <record>/inception/user-stories/stories.md (if produced)
+inputs: <record>/inception/domain-design/components.md, <record>/inception/requirements-analysis/requirements.md, <record>/inception/user-stories/stories.md (if produced), <record>/inception/refined-mockups/mockups.md and interaction-spec.md (if produced)
 outputs: unit-of-work.md, unit-of-work-dependency.md, unit-of-work-story-map.md, traceability.json (under this stage's record dir, engine-resolved)
 ---
 
@@ -58,6 +62,7 @@ NOTE: **Stage 2.7 produces the dependency DAG (topology). Stage 2.9 Delivery Pla
 - Read the Architecture Decision Records from `<record>/inception/domain-design/decisions.md` (if produced) — the boundary/ownership ADRs constrain how components may be grouped into units (a decision to keep two components separately deployable, for instance, forbids bundling them into one unit)
 - Read `<record>/inception/requirements-analysis/requirements.md`
 - Read `<record>/inception/user-stories/stories.md` (if produced)
+- Read `<record>/inception/refined-mockups/mockups.md` and `interaction-spec.md` (if produced) — they list the screens, controls and commands the stories are reached through, and each one needs a Unit that builds it
 
 ### Step 2: Create Decomposition Plan with Questions
 
@@ -134,6 +139,7 @@ NOTE: This artifact describes topology only. It does NOT pick a single "recommen
 - One row per upstream item, keyed the way the traceability enumeration below is keyed. When `stories.md` is produced, key every row by `USx.y`; only `USx.y` rows are read. Otherwise key rows by `FR`, and optionally add an `NFR` row for any NFR this scope also traces; a requirement with sub-requirements is traced through its `FR{n}.{m}` IDs, so key its rows by those. Each row names the implementing Unit `U{n}` ID and directory name, for example `| US1.1 | U1 | u1-ledger |`; separate several Units in one cell with `;`. Every Unit a row names traces all of that row's acceptance criteria in its Functional Design, so name a Unit on a row only when it implements part of that item
 - Rows that span multiple units (cross-cutting concerns)
 - How each story is reached, when `stories.md` is produced. A story someone uses needs a Unit that exposes it: a `ui` or `service` Unit on its row does (so does a Unit with no kind). When every Unit on the row is a `library`, `spec` or `packaging` Unit, add the Unit that builds the screen, command or endpoint, or say how the story is reached in a `Reached through` cell on its row: `existing: <where>` when the product already has that place and this work changes what is behind it, `interface` when the story's caller is a developer or another system. When one answer holds for every story (a library, or a fix behind screens that exist), write it once below the table as `Reached through: <answer>`. An answer states a fact the person approves at the gate: a story a person uses, with no screen in the product or in the plan, needs a Unit for that screen, not an answer
+- When mockups were produced, every screen, control and command they show belongs to a Unit whose responsibilities in `unit-of-work.md` say it builds it. A screen no Unit's responsibilities name is a gap in the plan, not a detail for Functional Design to find
 - Implementation order within each unit
 - Coverage verification: every enumerated ID assigned, every unit has rows
 
