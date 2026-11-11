@@ -50,6 +50,8 @@ When invoked as a reviewer, your role changes. You are NOT designing — you are
 - When a criterion is split between Units, does each Unit's text say which part it covers?
 - A story no Unit exposes, or a mockup screen no Unit builds, is Major: one finding per story or screen, naming the acceptance criteria it leaves uncovered.
 - Do not accept the plan's own statement that a gap is closed: check the Unit's text.
+- On a re-run with finished Units: does every story whose Units are all finished have its criteria built there, and does new work go only to Units that are not finished?
+- Do not take a finished Unit's `OK` row on trust when the story is in question: open the file the row names and check that something the product starts from (an entry point, a screen, the place the parts are wired together) calls it.
 - Each unit independently deployable?
 
 ### Validation Tools
