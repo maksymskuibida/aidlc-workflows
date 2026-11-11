@@ -63,6 +63,7 @@ NOTE: **Stage 2.7 produces the dependency DAG (topology). Stage 2.9 Delivery Pla
 - Read `<record>/inception/requirements-analysis/requirements.md`
 - Read `<record>/inception/user-stories/stories.md` (if produced)
 - Read `<record>/inception/refined-mockups/mockups.md` and `interaction-spec.md` (if produced) — they list the screens, controls and commands the stories are reached through, and each one needs a Unit that builds it
+- When this stage runs again after Construction began, run `{{INVOKE}} engine sensor-traceability --stage units-generation --built` and read its list first. Finished Units keep their built work as it is: give a finished Unit no new story or criterion; new work goes to a new Unit or to one that is not finished, unless the person chooses to reopen the finished Unit. Every story it lists as unbuilt needs a Unit in the revised plan. Started Units are someone's work in progress: tell the person which of their rows the revision changes
 
 ### Step 2: Create Decomposition Plan with Questions
 
@@ -94,6 +95,7 @@ Collect answers following stage-protocol.md §3 question flow (offer interaction
 
 Present the decomposition plan to the user as a structured question:
 - Summarize the approach: unit boundary strategy, estimated unit count, dependency structure, and the proposed kind per unit (service/spec/ui/packaging/library) so the human confirms the design-artifact scope each unit will carry into Construction
+- On a re-run after Construction began, the summary names, for each story the `--built` list gives as unbuilt, the Unit that takes it
 - Options: Approve Plan / Revise Plan
 
 ---
@@ -187,7 +189,9 @@ well-formed, cycle-free fenced `yaml` edge block. `traceability` owns
 `traceability.json`, derives the Unit set, and verifies every story, or every
 fallback `FR` when `stories.md` is not produced, maps to its declared target
 Unit. With `stories.md` it also names every story whose row holds only
-`library`, `spec` or `packaging` Units and no `Reached through` answer.
+`library`, `spec` or `packaging` Units and no `Reached through` answer, and, when
+Units are already finished, every story whose Units are all finished and did not
+build all its acceptance criteria.
 
 ## Learn
 
