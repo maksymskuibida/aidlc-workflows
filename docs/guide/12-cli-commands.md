@@ -773,7 +773,9 @@ see a Unit that landed. After it, this checkout shows the board instead of
 building Units. A push the remote refuses keeps the commit and says why; pull
 the branch, then share again. `/aidlc` offers this step itself when it is due:
 before a Unit would start on the lead's checkout, and after a land the remote
-does not have yet.
+does not have yet. A landing the remote's integration branch holds as a squash
+or a rebase of the records pull request counts as there: its landing record is
+on that branch, so no push of it is offered.
 
 ### `/aidlc unit publish <unit>` — Publish a completed candidate
 
@@ -833,7 +835,10 @@ for a stage's documents (after a merge of main changed them, say), a missing
 receipt or approval, a record outside the Unit's folder. `notes` block nothing:
 main has commits the Unit has not merged but merges cleanly with, or the branch
 holds commits of the local main that the remote does not have yet (a Unit
-landed but not pushed), which pin would read as this Unit's own change.
+landed but not pushed), which pin would read as this Unit's own change. A
+landing the branch merged commit by commit while the integration branch has it
+squashed (its records pull request was squash-merged) is not called unpushed:
+the note says to merge the integration branch into this branch, then publish.
 Nothing is published, pinned or recorded. The merge needs git 2.38 or later;
 an older git gets a note and land checks the merge itself.
 

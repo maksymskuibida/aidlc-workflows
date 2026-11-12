@@ -20,7 +20,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { appendAuditEntry, startClaimLocalRecord, takeHandedOverAuditRows } from "./aidlc-audit.ts";
-import { completedUnits, scopeStampLanded, unitProgressTable, unitRowMerged } from "./aidlc-unit-landing.ts";
+import { completedUnits, landingRecorded, scopeStampLanded, unitProgressTable, unitRowMerged } from "./aidlc-unit-landing.ts";
 import { gitUserName, personGitNameField } from "./aidlc-git-name.ts";
 import {
   managedBlockMarkers,
@@ -5481,17 +5481,15 @@ function shareMain(projectDir?: string): void {
     const said = `${remote} did not take ${branch}: ${pushRefusal(pushed.stderr)}. `;
     // The remote's rules refuse a direct push, so pulling changes nothing. The
     // way that works is a branch of the person's own, merged into the
-    // integration branch through the repository's review. The engine knows a
-    // landing reached the remote by finding its commit there (landedNotOnRemote),
-    // so the merge keeps the commits; a squash or a rebase makes new ones.
+    // integration branch through the repository's review. A merge commit, a
+    // squash or a rebase all bring it there (landedNotOnRemote, landingRecorded).
     if (pushRefusedByPolicy(pushed.stderr)) {
       fail(
         said +
           `${committed > 0 ? "The commit" : "The work"} is kept here. ${branch} does not take a push from you, ` +
           `so pulling will not help. Push it to a branch of your own with ` +
           `\`git push ${remote} HEAD:refs/heads/${branch}-share\`, then merge it into ${branch} through the ` +
-          `repository's own review, as a merge commit, not a squash or a rebase, so the commits reach ${branch}. ` +
-          `Then pull ${branch}.`,
+          `repository's own review. Then pull ${branch}.`,
       );
     }
     fail(`${said}${committed > 0 ? "The commit is kept here: " : ""}pull ${branch}, then share again.`);
@@ -5535,7 +5533,8 @@ export function refreshClaimRefs(projectDir: string): boolean {
 }
 
 // Units landed here that the remote's integration branch, as last fetched,
-// does not have yet: the push after a land is due for them.
+// does not have yet: the push after a land is due for them. A records pull
+// request squash-merged there brought the landing too (landingRecorded).
 export function landedNotOnRemote(projectDir: string): Array<{ unit: string; commit: string }> {
   const pd = resolveProjectDir(projectDir);
   let remote: string | null;
@@ -5553,6 +5552,8 @@ export function landedNotOnRemote(projectDir: string): Array<{ unit: string; com
     if (!localGit(pd, ["rev-parse", "--verify", "--quiet", ref]).ok) continue;
     if (localGit(pd, ["merge-base", "--is-ancestor", commit, ref]).ok) continue;
     if (!localGit(pd, ["merge-base", "--is-ancestor", commit, "HEAD"]).ok) continue;
+    const landing = { unit: transaction.unit, mergeOid: commit, pinnedOid: transaction.pinned_oid, generation: transaction.generation };
+    if (landingRecorded(pd, ref, landing)) continue;
     landed.push({ unit: transaction.unit, commit });
   }
   return landed;
@@ -5582,20 +5583,28 @@ const PREFLIGHT_IDENTITY = {
   GIT_COMMITTER_EMAIL: "preflight@aidlc.invalid",
 };
 
-// The other Units whose landing this branch merged and the integration branch
-// does not have yet, as a merge from a main whose landings were not pushed
-// brings them: each landing is a merge whose second parent is that Unit's
-// claim commit.
-function landingsNotOnIntegration(projectDir: string, integrationOid: string, headOid: string, unit: string): string[] {
+// The other Units whose landing this branch merged as the landing's own
+// commits while the integration branch does not have those commits: each
+// landing is a merge whose second parent is that Unit's claim commit. Either
+// it was landed on main and not pushed (`unpushed`), or the integration branch
+// holds it as a squash of its records pull request (`squashed`, landingRecorded).
+// Pin reads what either brought as this Unit's own change.
+function landingsNotOnIntegration(
+  projectDir: string,
+  integrationOid: string,
+  headOid: string,
+  unit: string,
+): { unpushed: string[]; squashed: string[] } {
   const merges = localGit(projectDir, ["rev-list", "--merges", `${integrationOid}..${headOid}`]);
-  if (!merges.ok) return [];
-  const units = new Set<string>();
-  for (const merge of merges.stdout.split(/\r?\n/).filter(Boolean)) {
+  const unpushed = new Set<string>();
+  const squashed = new Set<string>();
+  for (const merge of merges.ok ? merges.stdout.split(/\r?\n/).filter(Boolean) : []) {
     const claimed = localGit(projectDir, ["rev-parse", "--verify", "--quiet", `${merge}^2`]);
     const payload = claimed.ok ? readPayload(projectDir, claimed.stdout.trim(), { localOnly: true }) : null;
-    if (payload && payload.unit !== unit) units.add(payload.unit);
+    if (!payload || payload.unit === unit) continue;
+    (landingRecorded(projectDir, integrationOid, { unit: payload.unit, mergeOid: merge }) ? squashed : unpushed).add(payload.unit);
   }
-  return [...units].sort();
+  return { unpushed: [...unpushed].sort(), squashed: [...squashed].sort() };
 }
 
 function commitCount(projectDir: string, range: string): number {
@@ -5657,7 +5666,16 @@ function preflightUnit(args: string[], projectDir?: string): void {
         `${unit} merges cleanly with ${behind === 1 ? "it" : "them"}.`,
     );
   }
-  const unpushed = landingsNotOnIntegration(pd, integration.oid, headOid, unit);
+  const { unpushed, squashed } = landingsNotOnIntegration(pd, integration.oid, headOid, unit);
+  if (squashed.length > 0) {
+    const one = squashed.length === 1;
+    notes.push(
+      `This branch merged the landing${one ? "" : "s"} of ${namesInProse(squashed.map((name) => `"${name}"`))} ` +
+        `commit by commit, and ${integrationName} has ${one ? "it" : "them"} squashed: pin reads what ` +
+        `${one ? "it" : "they"} brought as ${unit}'s own change. Merge ${integrationName} into this branch, ` +
+        `then publish ${unit}.`,
+    );
+  }
   if (unpushed.length > 0) {
     const one = unpushed.length === 1;
     notes.push(
