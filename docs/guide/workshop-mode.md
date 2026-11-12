@@ -68,11 +68,28 @@ workspace's agent instructions, for example:
   `aidlc unit publish <unit>`. Code pull requests may be squash-merged.
 - **The Unit's records reach the workspace's main through the lead's records
   pull request,** opened after each `aidlc unit land` (or a batch the lead
-  picks), and **merged with a merge commit, never a squash or a rebase.** A
-  squash leaves the claim commit out of main's history: the developer's next
-  pull then conflicts in `aidlc-state.md`, and their checkout stays scoped to
-  the landed Unit. Its content is what the stage gates, pin and the merge gate
-  already approved.
+  picks), and merged whichever way the repository merges: a merge commit, a
+  squash or a rebase. Its content is what the stage gates, pin and the merge
+  gate already approved. The landing itself is always the merge commit
+  `unit land` makes and checks; a squash or a rebase brings its content to
+  main as new commits, and AI-DLC reads the landing there from the Unit's
+  landing record the land wrote into the audit log (the Unit, its pinned
+  candidate, the merge commit and the attempt), never from the Unit Progress
+  table alone. So once a checkout holds main with that record, the
+  developer's checkout is no longer scoped to the landed Unit, and the lead is
+  not offered a push of it. After a squash or a rebase, git no longer has the
+  Unit's commits on main: merging main into the old Unit branch, or rebasing
+  that branch onto it, stops on a conflict in `aidlc-state.md`. Leave that
+  branch instead and move to main as the remote has it, in the developer's
+  checkout and in the lead's alike:
+  `git fetch origin`, then on `main`, `git reset --keep origin/main` (it keeps
+  uncommitted changes and refuses when one is in the way; with the worktree
+  above, remove the Unit's worktrees). A Unit branch that merged the records
+  branch before the pull request was squashed holds that landing commit by
+  commit; pin refuses it until it merges main, and `unit preflight`,
+  `unit publish` and pin's refusal say so. Merging main into it (resolving
+  `aidlc-state.md` where both changed the Unit Progress table) and publishing
+  again is what lets pin read only that Unit's own change.
 - **The lead commits and pushes Inception's records before running `next`
   again** after choosing several teams.
 

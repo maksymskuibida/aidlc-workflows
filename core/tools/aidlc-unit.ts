@@ -20,7 +20,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { appendAuditEntry, startClaimLocalRecord, takeHandedOverAuditRows } from "./aidlc-audit.ts";
-import { completedUnits, scopeStampLanded, unitProgressTable, unitRowMerged } from "./aidlc-unit-landing.ts";
+import { completedUnits, landingRecorded, scopeStampLanded, unitProgressTable, unitRowMerged } from "./aidlc-unit-landing.ts";
 import { gitUserName, personGitNameField } from "./aidlc-git-name.ts";
 import {
   managedBlockMarkers,
@@ -1815,8 +1815,29 @@ function claimedCheckout(owner: string, unit: string): string {
 // tree, so the three cannot drift apart. It starts mid-sentence: publish puts
 // it after "Pin will refuse this candidate:", pin and land after their refusal.
 // Pin and land run in the main checkout, so they name the owner's checkout
-// where publish, run in that checkout, says "this branch".
-function outsideUnitTreeNextStep(unit: string, integrationRef: string, owner?: string): string {
+// where publish, run in that checkout, says "this branch". `squashed` names
+// the Units whose landing the branch merged commit by commit while the
+// integration branch holds it as a squash (landingsNotOnIntegration): those
+// records are already there, so taking them out is not the way forward;
+// merging the integration branch is.
+function outsideUnitTreeNextStep(
+  unit: string,
+  integrationRef: string,
+  owner?: string,
+  squashed: string[] = [],
+): string {
+  const integrationName = integrationRef.replace(/^refs\/(remotes|heads)\//, "");
+  if (squashed.length > 0) {
+    const one = squashed.length === 1;
+    const merge = owner === undefined
+      ? `Merge ${integrationName} into this branch and publish again`
+      : `In ${claimedCheckout(owner, unit)}, merge ${integrationName} into its branch and publish again; ` +
+        `then pin ${unit} again`;
+    return `the branch merged the landing${one ? "" : "s"} of ` +
+      `${namesInProse(squashed.map((name) => `"${name}"`))} commit by commit, and ${integrationName} has ` +
+      `${one ? "it" : "them"} squashed, so pin reads what ${one ? "it" : "they"} brought as ${unit}'s own ` +
+      `change. ${merge}.`;
+  }
   const where = owner === undefined
     ? "Take these out of this branch"
     : `In ${claimedCheckout(owner, unit)}, take these out of its branch`;
@@ -1824,7 +1845,7 @@ function outsideUnitTreeNextStep(unit: string, integrationRef: string, owner?: s
     `construction/${unit}/ and its own audit shard, and a shared record (an Inception artifact ` +
     `such as contract-summary.md, or a stage-level file) is changed on main. ${where} ` +
     "(git rm a file main does not have, or " +
-    `git checkout ${integrationRef.replace(/^refs\/(remotes|heads)\//, "")} -- <path> for one it does), commit, and ` +
+    `git checkout ${integrationName} -- <path> for one it does), commit, and ` +
     "publish again.";
 }
 
@@ -1834,9 +1855,10 @@ function refuseWithNextStep(
   unit: string,
   integrationRef: string,
   owner: string | undefined,
+  squashed: () => string[] = () => [],
 ): string {
   if (outsideUnitTreePaths(violations).length === 0) return message;
-  const step = outsideUnitTreeNextStep(unit, integrationRef, owner);
+  const step = outsideUnitTreeNextStep(unit, integrationRef, owner, squashed());
   return `${message} ${step[0].toUpperCase()}${step.slice(1)}`;
 }
 
@@ -2085,6 +2107,7 @@ function candidateEvidence(
         claim.unit,
         claim.payload.integration_ref,
         inClaimedCheckout ? undefined : claim.owner,
+        () => landingsNotOnIntegration(projectDir, liveIntegrationOid, claim.oid, claim.unit).squashed,
       ),
     );
   }
@@ -2483,7 +2506,7 @@ function publishUnit(args: string[], projectDir?: string): void {
   }
   const {
     remote, current, headOid, recordPrefix, auditShard, publicationBaseOid, publicationIntegrationRef, headTree,
-    payload: candidatePayload, missingReviews: missing,
+    integration, payload: candidatePayload, missingReviews: missing,
   } = publicationCandidate(pd, unit, stamp, "publication refused");
   const missingReviews = missing.length > 0 ? { review_records_missing: missing } : {};
   // Pin refuses any other record outside the Unit's tree, so publish names
@@ -2496,7 +2519,14 @@ function publishUnit(args: string[], projectDir?: string): void {
     ? {
       records_outside_unit_tree: outside,
       records_outside_unit_tree_note:
-        `Pin will refuse this candidate: ${outsideUnitTreeNextStep(unit, publicationIntegrationRef)}`,
+        `Pin will refuse this candidate: ${
+          outsideUnitTreeNextStep(
+            unit,
+            publicationIntegrationRef,
+            undefined,
+            landingsNotOnIntegration(pd, integration.oid, headOid, unit).squashed,
+          )
+        }`,
     }
     : {};
   const codeRepos = codeRepoResults(pd, unit, current.payload.code_repos ?? []);
@@ -5481,17 +5511,15 @@ function shareMain(projectDir?: string): void {
     const said = `${remote} did not take ${branch}: ${pushRefusal(pushed.stderr)}. `;
     // The remote's rules refuse a direct push, so pulling changes nothing. The
     // way that works is a branch of the person's own, merged into the
-    // integration branch through the repository's review. The engine knows a
-    // landing reached the remote by finding its commit there (landedNotOnRemote),
-    // so the merge keeps the commits; a squash or a rebase makes new ones.
+    // integration branch through the repository's review. A merge commit, a
+    // squash or a rebase all bring it there (landedNotOnRemote, landingRecorded).
     if (pushRefusedByPolicy(pushed.stderr)) {
       fail(
         said +
           `${committed > 0 ? "The commit" : "The work"} is kept here. ${branch} does not take a push from you, ` +
           `so pulling will not help. Push it to a branch of your own with ` +
           `\`git push ${remote} HEAD:refs/heads/${branch}-share\`, then merge it into ${branch} through the ` +
-          `repository's own review, as a merge commit, not a squash or a rebase, so the commits reach ${branch}. ` +
-          `Then pull ${branch}.`,
+          `repository's own review. Then pull ${branch}.`,
       );
     }
     fail(`${said}${committed > 0 ? "The commit is kept here: " : ""}pull ${branch}, then share again.`);
@@ -5535,7 +5563,8 @@ export function refreshClaimRefs(projectDir: string): boolean {
 }
 
 // Units landed here that the remote's integration branch, as last fetched,
-// does not have yet: the push after a land is due for them.
+// does not have yet: the push after a land is due for them. A records pull
+// request squash-merged there brought the landing too (landingRecorded).
 export function landedNotOnRemote(projectDir: string): Array<{ unit: string; commit: string }> {
   const pd = resolveProjectDir(projectDir);
   let remote: string | null;
@@ -5553,6 +5582,8 @@ export function landedNotOnRemote(projectDir: string): Array<{ unit: string; com
     if (!localGit(pd, ["rev-parse", "--verify", "--quiet", ref]).ok) continue;
     if (localGit(pd, ["merge-base", "--is-ancestor", commit, ref]).ok) continue;
     if (!localGit(pd, ["merge-base", "--is-ancestor", commit, "HEAD"]).ok) continue;
+    const landing = { unit: transaction.unit, mergeOid: commit, pinnedOid: transaction.pinned_oid, generation: transaction.generation };
+    if (landingRecorded(pd, ref, landing)) continue;
     landed.push({ unit: transaction.unit, commit });
   }
   return landed;
@@ -5582,20 +5613,29 @@ const PREFLIGHT_IDENTITY = {
   GIT_COMMITTER_EMAIL: "preflight@aidlc.invalid",
 };
 
-// The other Units whose landing this branch merged and the integration branch
-// does not have yet, as a merge from a main whose landings were not pushed
-// brings them: each landing is a merge whose second parent is that Unit's
-// claim commit.
-function landingsNotOnIntegration(projectDir: string, integrationOid: string, headOid: string, unit: string): string[] {
+// The other Units whose landing this branch merged as the landing's own
+// commits while the integration branch does not have those commits: each
+// landing is a merge whose second parent is that Unit's claim commit. Either
+// it was landed on main and not pushed (`unpushed`), or the integration branch
+// holds it as a squash of its records pull request (`squashed`, landingRecorded).
+// Pin reads what either brought as this Unit's own change; for a squashed one
+// its refusal (outsideUnitTreeNextStep) says to merge the integration branch.
+function landingsNotOnIntegration(
+  projectDir: string,
+  integrationOid: string,
+  headOid: string,
+  unit: string,
+): { unpushed: string[]; squashed: string[] } {
   const merges = localGit(projectDir, ["rev-list", "--merges", `${integrationOid}..${headOid}`]);
-  if (!merges.ok) return [];
-  const units = new Set<string>();
-  for (const merge of merges.stdout.split(/\r?\n/).filter(Boolean)) {
+  const unpushed = new Set<string>();
+  const squashed = new Set<string>();
+  for (const merge of merges.ok ? merges.stdout.split(/\r?\n/).filter(Boolean) : []) {
     const claimed = localGit(projectDir, ["rev-parse", "--verify", "--quiet", `${merge}^2`]);
     const payload = claimed.ok ? readPayload(projectDir, claimed.stdout.trim(), { localOnly: true }) : null;
-    if (payload && payload.unit !== unit) units.add(payload.unit);
+    if (!payload || payload.unit === unit) continue;
+    (landingRecorded(projectDir, integrationOid, { unit: payload.unit, mergeOid: merge }) ? squashed : unpushed).add(payload.unit);
   }
-  return [...units].sort();
+  return { unpushed: [...unpushed].sort(), squashed: [...squashed].sort() };
 }
 
 function commitCount(projectDir: string, range: string): number {
@@ -5657,7 +5697,9 @@ function preflightUnit(args: string[], projectDir?: string): void {
         `${unit} merges cleanly with ${behind === 1 ? "it" : "them"}.`,
     );
   }
-  const unpushed = landingsNotOnIntegration(pd, integration.oid, headOid, unit);
+  // A landing the integration branch holds squashed brings records outside
+  // this Unit's tree, so pin's refusal above already says to merge it.
+  const { unpushed } = landingsNotOnIntegration(pd, integration.oid, headOid, unit);
   if (unpushed.length > 0) {
     const one = unpushed.length === 1;
     notes.push(
