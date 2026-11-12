@@ -16732,6 +16732,13 @@ function teamUnitAttemptNote(
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
+// Whether this checkout's claimed Unit skipped `slug` in its current attempt.
+function claimedUnitSkipped(projectDir: string, stateContent: string | null, slug: string): boolean {
+  if (stateContent === null) return false;
+  const stamp = readApplicableTeamUnitScopeStamp(projectDir, stateContent);
+  return stamp !== null && unitSkippedUnits(projectDir, slug, undefined, stateContent).has(stamp.unit);
+}
+
 function emitTeamUnitMajorRunStage(
   projectType: "brownfield" | "greenfield" | null,
   scope: string,
@@ -18289,8 +18296,13 @@ function emitUnitMajorRunStage(
   // walk before the walking-skeleton stance is resolved. functional-design is
   // both the first block stage and the skeleton-gate stage for
   // feature/enterprise/mvp (nfr-requirements for infra); emit the classify
-  // directive and return until the stance is recorded.
-  if (isSkeletonGateStage(node, scope, stateContent) && readSkeletonStance(stateContent) === null) {
+  // directive and return until the stance is recorded. A claimed checkout whose
+  // Unit skipped that stage reads nothing on it: the walk goes on to the Unit's
+  // next step, which a claimed checkout takes no stance for (teamStanceToRead).
+  if (
+    isSkeletonGateStage(node, scope, stateContent) && readSkeletonStance(stateContent) === null &&
+    !(teamOwnership && claimedUnitSkipped(projectDir, stateContent, node.slug))
+  ) {
     emitRunStageForSlug(node.slug, projectType, scope, stateContent, recordPrefix, codekbCtx);
     return;
   }
