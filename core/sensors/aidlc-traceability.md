@@ -48,7 +48,9 @@ opens, on the tables as they are then:
    there are no stories) whose reason names another Unit of the plan, by name or
    `U{n}` ID, is a hand-off; at least one Unit it names must be on that story's
    (or FR's) row in `unit-of-work-story-map.md`, or it is reported as an invalid
-   target. At Units Generation, with
+   target. At Units Generation, a story or requirement no Unit's row names is a gap, unless the team keeps it out of every Unit on purpose: a `Deferred` row
+   with a non-empty target (the reason and where it is handled, say Operation) settles it, with `none` in its story-map Units cell. An `N/A` row
+   does not, since it is also how an ID is handed to another Unit. At Units Generation, with
    stories, a story whose row names only `library`, `spec` or `packaging` Units
    says how it is reached (`existing: <where>` or `interface`, on its row or
    once as a `Reached through:` line), or it is reported as an invalid target. A Functional Design Unit
